@@ -1,7 +1,8 @@
-import { Link, NavLink, Navigate, Outlet } from 'react-router-dom';
+import { Link, NavLink, Navigate, Outlet, useNavigate } from 'react-router-dom';
 import { Flag } from '../../components/flag/Flag';
 import { useWorldContext } from '../../api/WorldProvider';
 import { useNation } from '../../api/useNation';
+import { authFn } from '../../api/auth';
 import { t } from '../../i18n/zh-Hant';
 import type { PanelContext } from './context';
 
@@ -19,8 +20,20 @@ const NAV_ITEMS: { to: string; icon: string; label: string }[] = [
 
 /** B 風深色數據面板殼——建設/政策/市場/軍事/外交/排行/任務共用的側欄版式。 */
 export function PanelLayout() {
-  const { world, unseenCount, markEventsSeen } = useWorldContext();
+  const navigate = useNavigate();
+  const { world, unseenCount, markEventsSeen, resetWorld } = useWorldContext();
   const { nation, status: nationStatus, error: nationError, refresh: refreshNation } = useNation();
+
+  async function handleLogout() {
+    try {
+      await authFn.logout();
+    } finally {
+      // 跨帳號事件外洩修復:無論後端登出成功與否,前端都要清空本地累積的
+      // world/events/游標,避免下一位使用同一裝置登入的人看到殘留事件。
+      resetWorld();
+      navigate('/login');
+    }
+  }
 
   // finding #6/#12:三態分離——401 導 /login,一般錯誤顯示重試,未建國才是 CTA(不可混為一談)。
   if (nationStatus === 'unauthenticated') {
@@ -56,7 +69,7 @@ export function PanelLayout() {
 
   return (
     <div className="flex min-h-screen bg-chart-panel2 text-[#e6e9ef]">
-      <nav className="w-52 flex-shrink-0 border-r border-[#232a38] bg-chart-panel py-5">
+      <nav className="flex w-52 flex-shrink-0 flex-col border-r border-[#232a38] bg-chart-panel py-5">
         <div className="flex items-center gap-2 border-b border-[#232a38] px-4 pb-4">
           {player ? <Flag spec={player.flag} className="h-6 w-9 rounded-sm" title={player.name} /> : null}
           <b className="text-sm">{player?.name ?? t.common.appName}</b>
@@ -78,6 +91,13 @@ export function PanelLayout() {
             </NavLink>
           ))}
         </div>
+        <button
+          type="button"
+          onClick={handleLogout}
+          className="mt-auto px-4 py-2 text-left text-sm text-[#9aa4b5] hover:text-white"
+        >
+          {t.auth.logout}
+        </button>
       </nav>
       <main className="flex-1 px-6 py-5 pb-24">
         <div className="mb-4 flex items-center gap-3">

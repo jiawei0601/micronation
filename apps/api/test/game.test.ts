@@ -33,7 +33,7 @@ describe('M7 api 全路由整合測試', () => {
 
   beforeAll(async () => {
     db = createTestD1();
-    env = { DB: db };
+    env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(
       db,
       'Test Season',
@@ -146,7 +146,7 @@ describe('M7 api 全路由整合測試', () => {
 
   it('07 敏感詞國名 → INVALID_NAME', async () => {
     const db2 = createTestD1();
-    const env2 = { DB: db2 };
+    const env2 = { DB: db2, ENVIRONMENT: 'test' };
     await createSeason(db2, 'S2', makeWorld({ seasonId: 'season-x', regions: [makeRegion()] }), 0);
     await app.request('/api/auth/register', {
       method: 'POST',

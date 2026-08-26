@@ -250,7 +250,7 @@ describe('runTick — 賽季到期結算', () => {
 describe('POST /api/admin/season', () => {
   it('token 錯誤 → 401', async () => {
     const db = createTestD1();
-    const env = { DB: db, ADMIN_TOKEN: 'secret-token' };
+    const env = { DB: db, ADMIN_TOKEN: 'secret-token', ENVIRONMENT: 'test' };
     const res = await app.request(
       '/api/admin/season',
       { method: 'POST', headers: { Authorization: 'Bearer wrong-token', 'Content-Type': 'application/json' }, body: '{}' },
@@ -261,7 +261,7 @@ describe('POST /api/admin/season', () => {
 
   it('未設定 ADMIN_TOKEN → 一律 401(不可能「沒設定就開放」)', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     const res = await app.request(
       '/api/admin/season',
       { method: 'POST', headers: { Authorization: 'Bearer anything', 'Content-Type': 'application/json' }, body: '{}' },
@@ -272,7 +272,7 @@ describe('POST /api/admin/season', () => {
 
   it('token 正確 → 開新賽季成功,含 NPC 國家', async () => {
     const db = createTestD1();
-    const env = { DB: db, ADMIN_TOKEN: 'secret-token' };
+    const env = { DB: db, ADMIN_TOKEN: 'secret-token', ENVIRONMENT: 'test' };
     const res = await app.request(
       '/api/admin/season',
       {
@@ -292,7 +292,7 @@ describe('POST /api/admin/season', () => {
 
   it('已有 active 賽季時再開新季 → 409 SEASON_ALREADY_ACTIVE', async () => {
     const db = createTestD1();
-    const env = { DB: db, ADMIN_TOKEN: 'secret-token' };
+    const env = { DB: db, ADMIN_TOKEN: 'secret-token', ENVIRONMENT: 'test' };
     await createSeason(db, 'Existing', makeWorld({ seasonId: 'existing', regions: [makeRegion()] }), 0);
 
     const res = await app.request(
@@ -307,7 +307,7 @@ describe('POST /api/admin/season', () => {
 describe('tick_running 阻擋玩家寫入(503 TICK_IN_PROGRESS)', () => {
   it('build 路由在 tick 進行中回 503', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S11', makeWorld({ seasonId: 's-11', regions: [makeRegion({ id: 'region-0' })] }), 0);
 
     await app.request(

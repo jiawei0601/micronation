@@ -107,7 +107,7 @@ describe('①-1/①-2 — squash migration:單一乾淨 schema,複合外鍵已�
 describe('①-3 — resendVerification:寄信失敗不覆蓋既有有效 token', () => {
   it('寄信失敗時,原本已寄出且有效的 verify_token 仍可用來驗證', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-resend3' }), 0);
     await app.request(
       '/api/auth/register',
@@ -142,7 +142,7 @@ describe('①-3 — resendVerification:寄信失敗不覆蓋既有有效 token',
 describe('①-4 — verifyEmail 過期判斷改用 <=', () => {
   it('verify_token_expires_at 剛好等於 now → 視為已過期(TOKEN_EXPIRED)', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-exp' }), 0);
     const now = 1_000_000;
     const reg = await app.request(
@@ -153,7 +153,8 @@ describe('①-4 — verifyEmail 過期判斷改用 <=', () => {
     expect(reg.status).toBe(201);
     const token = mailSender.lastToken!;
     // 直接改 DB 把過期時間設成「現在這一刻」,驗證用同一個 now 呼叫 verifyEmail。
-    await db.prepare('UPDATE users SET verify_token_expires_at = ?').bind(now).run();
+    // ③-1:過期時間現在存在 verification_tokens.expires_at(多列表),不是 users 欄位。
+    await db.prepare('UPDATE verification_tokens SET expires_at = ?').bind(now).run();
 
     const { verifyEmail } = await import('../src/auth/service');
     const result = await verifyEmail(db, token, now);
@@ -417,7 +418,7 @@ describe('②-4 — production 缺少 RESEND_API_KEY 時 fail fast', () => {
 describe('②-5 — resend 探測回應統一 202,不洩漏帳號存在性', () => {
   it('帳號不存在與帳號存在皆回 202', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     const notFound = await app.request(
       '/api/auth/resend',
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'nobody@example.com' }) },
@@ -442,7 +443,7 @@ describe('②-5 — resend 探測回應統一 202,不洩漏帳號存在性', () 
 describe('②-6 — 未處理錯誤回應只給 generic error + requestId', () => {
   it('CorruptRowError 不再把 table/rowId/field 洩漏到回應本體', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-corrupt', nations: [makeNation({ id: 'nation-1' })] }), 0);
     await db.prepare("UPDATE nations SET flag = '{corrupt' WHERE id = ?").bind('nation-1').run();
 
@@ -459,7 +460,7 @@ describe('②-6 — 未處理錯誤回應只給 generic error + requestId', () =
 describe('②-7 — 毀約賠償不超過毀約方實際可付金額', () => {
   it('毀約方餘額不足以付全額賠償時,雙方轉帳金額一致(不憑空印錢)', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-breach-poor', tick: 200, regions: [makeRegion({ id: 'region-0' })] }), 0);
     const a = await registerLoginFoundNation(db, env, 'poor-a@example.com', 'A國');
     const b = await registerLoginFoundNation(db, env, 'poor-b@example.com', 'B國');
@@ -510,7 +511,7 @@ describe('②-7 — 毀約賠償不超過毀約方實際可付金額', () => {
 describe('②-9 — 訊息分頁 limit 驗整數', () => {
   it('limit 為小數/負數 → 400 INVALID_LIMIT', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-limit', tick: 200, regions: [makeRegion({ id: 'region-0' })] }), 0);
     const nation = await registerLoginFoundNation(db, env, 'limit@example.com', '分頁國');
 
@@ -521,26 +522,39 @@ describe('②-9 — 訊息分頁 limit 驗整數', () => {
   });
 });
 
-describe('②-11 — admin 開季 npcCount 上限', () => {
-  it('npcCount 超過上限時退回 DEFAULT_NPC_COUNT,不會產生超量 NPC', async () => {
+describe('②-11/③-4 — admin 開季 npcCount 上限', () => {
+  // ③-4:原本超過上限時悄悄退回 DEFAULT_NPC_COUNT——呼叫端以為自己指定的數字生效了,實際上
+  // 系統默默改用別的數字。改成有帶但不合法(超過上限/負數/非安全整數)一律 400,不再猜測。
+  it('npcCount 超過上限 → 400 INVALID_BODY,不悄悄退回預設值', async () => {
     const db = createTestD1();
-    const env = { DB: db, ADMIN_TOKEN: 'tok' };
+    const env = { DB: db, ADMIN_TOKEN: 'tok', ENVIRONMENT: 'test' };
     const res = await app.request(
       '/api/admin/season',
       { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer tok' }, body: JSON.stringify({ npcCount: 99999 }) },
       env
     );
+    expect(res.status).toBe(400);
+  });
+
+  it('npcCount 在合法範圍內時正常開季', async () => {
+    const db = createTestD1();
+    const env = { DB: db, ADMIN_TOKEN: 'tok', ENVIRONMENT: 'test' };
+    const res = await app.request(
+      '/api/admin/season',
+      { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer tok' }, body: JSON.stringify({ npcCount: 5 }) },
+      env
+    );
     expect(res.status).toBe(201);
     const { seasonId } = await json<{ seasonId: string }>(res);
     const loaded = await loadWorldState(db, seasonId);
-    expect(loaded!.nations.length).toBeLessThanOrEqual(50);
+    expect(loaded!.nations.length).toBe(5);
   });
 });
 
 describe('②-12 — admin 開季 body 壞 JSON → 400(不靜默用預設值）', () => {
   it('壞 JSON body → 400 INVALID_BODY,不悄悄開季', async () => {
     const db = createTestD1();
-    const env = { DB: db, ADMIN_TOKEN: 'tok' };
+    const env = { DB: db, ADMIN_TOKEN: 'tok', ENVIRONMENT: 'test' };
     const res = await app.request(
       '/api/admin/season',
       { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer tok' }, body: 'not json' },
@@ -589,7 +603,7 @@ describe('②-16 — buildHallOfFameEntries 空國家防禦', () => {
 describe('②-18 — messages body 欄位型別檢查(不是字串時不 500)', () => {
   it('toNationId/body 為數字 → 400 INVALID_BODY,不是未預期例外', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-msgtype', tick: 200, regions: [makeRegion({ id: 'region-0' })] }), 0);
     const nation = await registerLoginFoundNation(db, env, 'msgtype@example.com', '型別國');
 
@@ -605,7 +619,7 @@ describe('②-18 — messages body 欄位型別檢查(不是字串時不 500)', 
 describe('②-19 — /api/world since 驗證非負安全整數', () => {
   it('since 為負數/小數 → 400 INVALID_SINCE', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-since', tick: 200, regions: [makeRegion({ id: 'region-0' })] }), 0);
     const nation = await registerLoginFoundNation(db, env, 'since@example.com', '游標國');
 

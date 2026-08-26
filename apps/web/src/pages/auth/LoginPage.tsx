@@ -2,9 +2,11 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { t } from '../../i18n/zh-Hant';
 import { authFn, authErrorMessage } from '../../api/auth';
+import { useWorldContext } from '../../api/WorldProvider';
 
 export function LoginPage() {
   const navigate = useNavigate();
+  const { resetWorld } = useWorldContext();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -16,6 +18,9 @@ export function LoginPage() {
     setError(null);
     try {
       await authFn.login(email, password);
+      // 跨帳號事件外洩修復:登入成功即清空前一個身分殘留的 world/events/游標,
+      // 不能等 identityKey 的自動偵測(晚一拍,且此時 nation 可能還沒 refetch)。
+      resetWorld();
       navigate('/');
     } catch (err) {
       setError(authErrorMessage(err));

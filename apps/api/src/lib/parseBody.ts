@@ -19,7 +19,16 @@ export async function parseJsonBody<T extends Record<string, unknown>>(
   }
   if (body === null || typeof body !== 'object' || Array.isArray(body)) return null;
   const typed = body as T;
-  if (validator && !validator(typed)) return null;
+  // ③-8:validator 呼叫本身也要納入「壞 body 一律回 null」的保護——原本 validator 拋例外時
+  // (例如呼叫端傳入的 validator 對某個欄位做了 `.something.nested` 這類假設欄位一定存在的
+  // 存取,遇到形狀怪異但仍是合法物件的 body 時丟 TypeError)會直接從 parseJsonBody 往外冒,
+  // 呼叫端(routes)沒有為此包 try/catch,最終被 index.ts onError 接住變成 500 INTERNAL_ERROR
+  // ——對「使用者傳了格式不對的 body」這種本該是 400 的情況,回應了語意錯誤的狀態碼。
+  try {
+    if (validator && !validator(typed)) return null;
+  } catch {
+    return null;
+  }
   return typed;
 }
 

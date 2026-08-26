@@ -19,7 +19,7 @@ import {
   type UserRow,
 } from '../src/db/repository';
 import { rowToNation, rowToTreaty, rowToOrder, rowToEvent, eventToRow, CorruptRowError, type NationRow, type TreatyRow, type OrderRow, type EventRow } from '../src/db/rows';
-import { makeWorld, makeNation, makeRegion } from './support/fixtures';
+import { makeWorld, makeNation, makeRegion, emptyBuildings } from './support/fixtures';
 import { parseSessionTokenFromCookieHeader } from '../src/auth/session';
 import type { D1Database, D1PreparedStatement, D1Result } from '../src/db/types';
 import { makeId } from '@micronation/shared';
@@ -39,7 +39,7 @@ const baseNationRow = (): NationRow => ({
   action_points: 0,
   population: 0,
   morale: 0,
-  buildings: '{}',
+  buildings: JSON.stringify(emptyBuildings()),
   build_queue: '[]',
   army_size: 0,
   policies: JSON.stringify({ tax: 'mid', economy: 'agri', conscription: 'volunteer', openness: 'neutral' }),
@@ -204,7 +204,7 @@ describe('finding #3 — 跨賽季一致性複合唯一鍵(migration 0004)', () 
       'idx_marches_season_id',
       'idx_treaties_season_id',
       'idx_orders_season_id',
-      'idx_users_verify_token', // finding #17
+      'idx_verification_tokens_user', // finding #17,③-1:改走 verification_tokens 多列表後的索引
     ]) {
       expect(indexes).toContain(idx);
     }
@@ -309,8 +309,6 @@ describe('finding #10 — completeTask 用 INSERT OR IGNORE(冪等)', () => {
       password_salt: 's',
       password_iterations: 1,
       verified: 0,
-      verify_token: null,
-      verify_token_expires_at: null,
       created_at: 0,
     } as UserRow);
 
@@ -331,8 +329,6 @@ describe('finding #10 — completeTask 用 INSERT OR IGNORE(冪等)', () => {
       password_salt: 's',
       password_iterations: 1,
       verified: 0,
-      verify_token: null,
-      verify_token_expires_at: null,
       created_at: 0,
     } as UserRow);
 

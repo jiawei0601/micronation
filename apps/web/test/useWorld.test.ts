@@ -284,6 +284,61 @@ describe('useWorld — 輪詢邏輯', () => {
     expect(result.current.world?.tick).toBe(99);
   });
 
+  it('resetWorld() clears events/world/error and rewinds the since cursor to 0', async () => {
+    const sinceSeqSeen: (number | undefined)[] = [];
+    const fetcher: WorldFetcher = {
+      fetchWorld: vi.fn(async ({ sinceSeq } = {}): Promise<WorldResponse> => {
+        sinceSeqSeen.push(sinceSeq);
+        const ev = fakeEvent(sinceSeqSeen.length);
+        return { view: fakeWorld(sinceSeqSeen.length), nextTickAt: 0, events: [ev], nextCursor: ev.seq };
+      }),
+    };
+    const { result } = renderHook(() => useWorld({ fetcher }));
+    await flushMicrotasks();
+    expect(result.current.world).not.toBeNull();
+    expect(result.current.events.length).toBe(1);
+    expect(sinceSeqSeen[0]).toBe(0);
+
+    act(() => result.current.resetWorld());
+
+    expect(result.current.world).toBeNull();
+    expect(result.current.events.length).toBe(0);
+    expect(result.current.error).toBeNull();
+
+    // 下一次輪詢應重新從 since=0 拉,不沿用重置前的游標(finding:跨帳號事件外洩)。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORLD_POLL_INTERVAL_MS);
+    });
+    expect(sinceSeqSeen.at(-1)).toBe(0);
+  });
+
+  it('changing identityKey auto-resets and refetches, but not on initial mount', async () => {
+    const sinceSeqSeen: (number | undefined)[] = [];
+    const fetcher: WorldFetcher = {
+      fetchWorld: vi.fn(async ({ sinceSeq } = {}): Promise<WorldResponse> => {
+        sinceSeqSeen.push(sinceSeq);
+        const ev = fakeEvent(sinceSeqSeen.length);
+        return { view: fakeWorld(sinceSeqSeen.length), nextTickAt: 0, events: [ev], nextCursor: ev.seq };
+      }),
+    };
+    const { result, rerender } = renderHook(({ identityKey }) => useWorld({ fetcher, identityKey }), {
+      initialProps: { identityKey: 'user-a' as string | null },
+    });
+    await flushMicrotasks();
+    // 首次掛載不算「身分變化」,不該多打一次(仍只有 mount 的那 1 次)。
+    expect(fetcher.fetchWorld).toHaveBeenCalledTimes(1);
+    expect(result.current.events.length).toBe(1);
+
+    // 模擬換帳號登入:identityKey 從 'user-a' 變成 'user-b'。
+    rerender({ identityKey: 'user-b' });
+    await flushMicrotasks();
+
+    // 換帳號後應自動重置(events/游標歸零)並重新拉一次。
+    expect(sinceSeqSeen.at(-1)).toBe(0);
+    expect(result.current.events.length).toBe(1); // 只剩新身分那筆,不是累積成 2 筆
+    expect(result.current.world?.tick).toBe(sinceSeqSeen.length);
+  });
+
   it('does not setState after unmount when a poll resolves late', async () => {
     let resolveFn: ((r: WorldResponse) => void) | null = null;
     const fetcher: WorldFetcher = {

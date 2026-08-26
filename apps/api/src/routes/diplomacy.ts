@@ -110,16 +110,34 @@ diplomacyRoutes.post('/breach', requireSession, async (c) => {
   const otherPartyId = treatyBefore!.aId === nation.id ? treatyBefore!.bId : treatyBefore!.aId;
   const penalty = breachPenalty(treatyBefore!);
   const actualCompensation = Math.max(0, Math.min(nation.resources.money, penalty.compensation));
+  const otherParty = state.nations.find((n) => n.id === otherPartyId);
+  // ③-5:收款方溢位檢查——otherParty.resources.money + actualCompensation 理論上可能超出
+  // Number.MAX_SAFE_INTEGER(極端情境,例如長期累積毀約賠償的巨額帳戶),超出後浮點數不再精確,
+  // 後續任何餘額比較/扣款都可能算錯,和 market.ts applyPlaceOrder 的 ②-2 同一原則。收款方若已
+  // 逼近安全整數上限,把這次賠償金額 clamp 到「不會讓收款方溢位」的最大可能值,不整筆拒絕
+  // (毀約本身合法,不該因為對方帳戶巨大就讓毀約失敗),但也不允許算出不精確的餘額。
+  const receiverRoom =
+    otherParty !== undefined ? Math.max(0, Number.MAX_SAFE_INTEGER - otherParty.resources.money) : actualCompensation;
+  const safeCompensation = Math.min(actualCompensation, receiverRoom);
+  // ③-5:reputationDelta 由 shared breachPenalty() 實際算出並套用,不再是路由自己硬寫死的字面
+  // 常數——原本 `+ 1` 完全忽略 breachPenalty 回傳的 reputationDelta(只用了 compensation 那一半
+  // 的回傳值),等於這個欄位算了但沒人用。改成 `breaches += Math.abs(penalty.reputationDelta)`
+  // (breachPenalty 目前回傳固定 -10,語意是「這次毀約的信譽扣分幅度」,取絕對值疊加到只增不減
+  // 的 breaches 計數器上),且同樣 clamp 在安全整數範圍內。
+  const reputationIncrement = Math.abs(penalty.reputationDelta);
   const nations = state.nations.map((n) => {
     if (n.id === nation.id) {
       return {
         ...n,
-        resources: { ...n.resources, money: n.resources.money - actualCompensation },
-        reputation: { ...n.reputation, breaches: n.reputation.breaches + 1 },
+        resources: { ...n.resources, money: n.resources.money - safeCompensation },
+        reputation: {
+          ...n.reputation,
+          breaches: Math.min(Number.MAX_SAFE_INTEGER, n.reputation.breaches + reputationIncrement),
+        },
       };
     }
     if (n.id === otherPartyId) {
-      return { ...n, resources: { ...n.resources, money: n.resources.money + actualCompensation } };
+      return { ...n, resources: { ...n.resources, money: n.resources.money + safeCompensation } };
     }
     return n;
   });

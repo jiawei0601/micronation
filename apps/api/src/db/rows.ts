@@ -66,16 +66,85 @@ function parseJsonShaped<T>(
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
-const isRecordOfNumbers = (v: unknown): boolean => isPlainObject(v) && Object.values(v).every((x) => typeof x === 'number');
-const isRecordOfStrings = (v: unknown): boolean => isPlainObject(v) && Object.values(v).every((x) => typeof x === 'string');
-
 const isBuildQueue = (v: unknown): boolean =>
   Array.isArray(v) &&
   v.every((item) => isPlainObject(item) && typeof item.building === 'string' && typeof item.completesAt === 'number');
 
 const SCORE_KEYS = ['economy', 'warfare', 'tech', 'diplomacy', 'total'] as const;
+// ③-6:score 每項改用 Number.isFinite——原本 `typeof v[k] === 'number'` 對 NaN/Infinity 一樣放行
+// (兩者的 typeof 都是 'number'),下游排名/顯示邏輯拿到 NaN 會靜默壞掉(例如排序永遠把它排在
+// 奇怪的位置、前端顯示 "NaN"),不是「解析失敗」該有的 fail-fast 行為。
 const isScore = (v: unknown): boolean =>
-  isPlainObject(v) && SCORE_KEYS.every((k) => typeof v[k] === 'number');
+  isPlainObject(v) && SCORE_KEYS.every((k) => typeof v[k] === 'number' && Number.isFinite(v[k]));
+
+// ③-6:buildings 全鍵存在(不多不少)+ 每個等級為非負整數——原本 isRecordOfNumbers 只檢查
+// 「有出現的鍵其值是 number」,缺鍵(某個 building 種類整個沒寫入,下游 `buildings[k] ?? 0`
+// 的 fallback 會悄悄接手,掩蓋掉本該視為壞資料的殘缺列)、負數等級、非整數等級(手改 DB 或
+// 序列化 bug)都會被放行,直到很後面的建築等級查表才因為查不到而炸開。
+const BUILDING_KINDS = ['farm', 'mine', 'refinery', 'market', 'barracks', 'warehouse', 'university', 'wall'] as const;
+const isBuildings = (v: unknown): boolean =>
+  isPlainObject(v) &&
+  Object.keys(v).length === BUILDING_KINDS.length &&
+  BUILDING_KINDS.every((k) => Number.isInteger(v[k]) && (v[k] as number) >= 0);
+
+// ③-6:policies 四軸各自套自己的合法檔位白名單(取代原本寬鬆的「值是字串就好」)——手改 DB/
+// 未來 bug 若寫入不存在的檔位字串(例如 tax 軸誤植成 'medium'),下游 TAX_MODIFIERS[tier] 之類
+// 查表會拿到 undefined,在很後面的資源結算才因為 undefined 運算炸開,錯誤訊息與這裡的壞資料
+// 對不上。
+const TAX_TIERS = ['low', 'mid', 'high'] as const;
+const ECONOMY_TIERS = ['agri', 'industry', 'commerce'] as const;
+const CONSCRIPTION_TIERS = ['volunteer', 'draft'] as const;
+const OPENNESS_TIERS = ['closed', 'neutral', 'free'] as const;
+const POLICY_AXES = ['tax', 'economy', 'conscription', 'openness'] as const;
+const isPolicies = (v: unknown): boolean =>
+  isPlainObject(v) &&
+  Object.keys(v).length === POLICY_AXES.length &&
+  (TAX_TIERS as readonly string[]).includes(v.tax as string) &&
+  (ECONOMY_TIERS as readonly string[]).includes(v.economy as string) &&
+  (CONSCRIPTION_TIERS as readonly string[]).includes(v.conscription as string) &&
+  (OPENNESS_TIERS as readonly string[]).includes(v.openness as string);
+
+// ③-6:policyChangedAt 的鍵須是合法的 PolicyAxis 子集(Partial<Record<PolicyAxis, Tick>>),
+// 值須為有限數——原本 isRecordOfNumbers 對任意字串鍵都放行。
+const isPolicyChangedAt = (v: unknown): boolean =>
+  isPlainObject(v) &&
+  Object.entries(v).every(
+    ([k, val]) => (POLICY_AXES as readonly string[]).includes(k) && typeof val === 'number' && Number.isFinite(val)
+  );
+
+// ③-6:FlagSpec——layout/emblem 為字串、colors 為字串陣列。
+const isFlagSpec = (v: unknown): boolean =>
+  isPlainObject(v) &&
+  typeof v.layout === 'string' &&
+  typeof v.emblem === 'string' &&
+  Array.isArray(v.colors) &&
+  v.colors.every((c) => typeof c === 'string');
+
+// ③-6:Region.bonuses——鍵須為合法 ResourceKind、值須為有限數(±百分比)。
+const isBonuses = (v: unknown): boolean =>
+  isPlainObject(v) &&
+  Object.entries(v).every(
+    ([k, val]) => (RESOURCE_KINDS as readonly string[]).includes(k) && typeof val === 'number' && Number.isFinite(val)
+  );
+
+// ③-6:TreatyTerms——duration 必要且為有限數,其餘欄位若存在須符合各自型別/範圍。
+const isTreatyTerms = (v: unknown): boolean => {
+  if (!isPlainObject(v)) return false;
+  if (typeof v.duration !== 'number' || !Number.isFinite(v.duration)) return false;
+  if (v.compensation !== undefined && (typeof v.compensation !== 'number' || !Number.isFinite(v.compensation))) return false;
+  if (v.allianceDefense !== undefined && typeof v.allianceDefense !== 'boolean') return false;
+  if (
+    v.tariffDiscount !== undefined &&
+    (typeof v.tariffDiscount !== 'number' || !Number.isFinite(v.tariffDiscount) || v.tariffDiscount < 0 || v.tariffDiscount > 1)
+  )
+    return false;
+  if (v.pendingResponderId !== undefined && typeof v.pendingResponderId !== 'string') return false;
+  if (v.activatedAt !== undefined && (typeof v.activatedAt !== 'number' || !Number.isFinite(v.activatedAt))) return false;
+  return true;
+};
+
+// ③-6:events.nation_ids——字串陣列。
+const isNationIds = (v: unknown): boolean => Array.isArray(v) && v.every((x) => typeof x === 'string');
 
 function assertEnum<T extends string>(
   table: string,
@@ -164,7 +233,7 @@ export function rowToNation(r: NationRow): Nation {
     id: r.id,
     ownerId: r.owner_id,
     name: r.name,
-    flag: parseJson('nations', r.id, 'flag', r.flag),
+    flag: parseJsonShaped('nations', r.id, 'flag', r.flag, isFlagSpec),
     regionId: r.region_id,
     resources: {
       food: r.resource_food,
@@ -176,11 +245,11 @@ export function rowToNation(r: NationRow): Nation {
     actionPoints: r.action_points,
     population: r.population,
     morale: r.morale,
-    buildings: parseJsonShaped('nations', r.id, 'buildings', r.buildings, isRecordOfNumbers),
+    buildings: parseJsonShaped('nations', r.id, 'buildings', r.buildings, isBuildings),
     buildQueue: parseJsonShaped('nations', r.id, 'build_queue', r.build_queue, isBuildQueue),
     army: { size: r.army_size },
-    policies: parseJsonShaped('nations', r.id, 'policies', r.policies, isRecordOfStrings),
-    policyChangedAt: parseJsonShaped('nations', r.id, 'policy_changed_at', r.policy_changed_at, isRecordOfNumbers),
+    policies: parseJsonShaped('nations', r.id, 'policies', r.policies, isPolicies),
+    policyChangedAt: parseJsonShaped('nations', r.id, 'policy_changed_at', r.policy_changed_at, isPolicyChangedAt),
     reputation: { breaches: r.reputation_breaches },
     protectedUntil: r.protected_until,
     score: parseJsonShaped('nations', r.id, 'score', r.score, isScore),
@@ -203,7 +272,7 @@ export function regionToRow(seasonId: string, index: number, r: Region): RegionR
 }
 
 export function rowToRegion(r: RegionRow): Region {
-  return { id: r.id, name: r.name, bonuses: parseJson('regions', r.id, 'bonuses', r.bonuses) };
+  return { id: r.id, name: r.name, bonuses: parseJsonShaped('regions', r.id, 'bonuses', r.bonuses, isBonuses) };
 }
 
 export interface MarchRow {
@@ -270,7 +339,7 @@ export function rowToTreaty(r: TreatyRow): Treaty {
     aId: r.a_id,
     bId: r.b_id,
     status: assertEnum('treaties', r.id, 'status', r.status, TREATY_STATUSES),
-    terms: parseJson('treaties', r.id, 'terms', r.terms),
+    terms: parseJsonShaped('treaties', r.id, 'terms', r.terms, isTreatyTerms),
     createdAt: r.created_at,
   };
 }
@@ -340,7 +409,7 @@ export function rowToEvent(r: EventRow): GameEvent {
   return {
     tick: r.tick,
     type: assertEnum('events', r.id, 'type', r.type, EVENT_TYPES),
-    nationIds: parseJson('events', r.id, 'nation_ids', r.nation_ids),
+    nationIds: parseJsonShaped('events', r.id, 'nation_ids', r.nation_ids, isNationIds),
     payload: parseJson('events', r.id, 'payload', r.payload),
   };
 }

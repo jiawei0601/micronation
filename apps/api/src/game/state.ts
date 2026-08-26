@@ -3,7 +3,7 @@
 
 import type { WorldState, Nation, Id, GameEvent, Trade } from '@micronation/shared';
 import type { D1Database } from '../db/types';
-import { loadWorldState, saveWorldState, getActiveSeasonId, getSeasonTickRunning, getSeasonVersion } from '../db/repository';
+import { loadWorldStateVersioned, saveWorldState, getActiveSeasonId, getSeasonTickRunning } from '../db/repository';
 
 export interface ActiveWorld {
   seasonId: Id;
@@ -21,10 +21,12 @@ export interface ActiveWorld {
 export async function loadActiveWorld(db: D1Database): Promise<ActiveWorld | null> {
   const seasonId = await getActiveSeasonId(db);
   if (!seasonId) return null;
-  const state = await loadWorldState(db, seasonId);
-  if (!state) return null;
-  const [tickRunning, version] = await Promise.all([getSeasonTickRunning(db, seasonId), getSeasonVersion(db, seasonId)]);
-  return { seasonId, state, tickRunning, version };
+  // ③-1/③-8:state 與 version 出自同一次 season row 讀取(loadWorldStateVersioned),不再另外
+  // 呼叫 getSeasonVersion 讀第二次——見 db/repository.ts 該函式的註解。
+  const loaded = await loadWorldStateVersioned(db, seasonId);
+  if (!loaded) return null;
+  const tickRunning = await getSeasonTickRunning(db, seasonId);
+  return { seasonId, state: loaded.state, tickRunning, version: loaded.version };
 }
 
 export function findOwnNation(state: WorldState, userId: Id): Nation | null {

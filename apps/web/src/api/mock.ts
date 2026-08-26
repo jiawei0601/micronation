@@ -161,7 +161,10 @@ export function mockRankings(world: PublicWorldView): {
 }
 
 /** POST /api/diplomacy/respond 的假回應——回傳更新後(本地推算)的條約清單,不落地持久化。
- *  action==='counter' 時,counterTerms(例:{duration})併入 terms,模擬後端還價行為。 */
+ *  action==='counter' 時,counterTerms(例:{duration})併入 terms,模擬後端還價行為;同時把
+ *  pendingResponderId 切到對方(aId/bId 中不是回應者的那一方),對齊真後端
+ *  (packages/diplomacy/src/index.ts respond():counter 後 pendingResponderId = otherParty),
+ *  否則畫面上「待回應方」的按鈕權限判斷在 mock 模式下永遠不會反轉。 */
 export function mockRespondToTreaty(
   treaties: readonly Treaty[],
   treatyId: string,
@@ -169,9 +172,13 @@ export function mockRespondToTreaty(
   counterTerms?: Partial<TreatyTerms>
 ): Treaty[] {
   const nextStatus = action === 'accept' ? 'active' : action === 'reject' ? 'rejected' : 'countered';
-  return treaties.map((tr) =>
-    tr.id === treatyId
-      ? { ...tr, status: nextStatus, terms: action === 'counter' && counterTerms ? { ...tr.terms, ...counterTerms } : tr.terms }
-      : tr
-  );
+  return treaties.map((tr) => {
+    if (tr.id !== treatyId) return tr;
+    if (action === 'counter') {
+      const responder = tr.terms.pendingResponderId;
+      const otherParty = responder === tr.aId ? tr.bId : tr.aId;
+      return { ...tr, status: nextStatus, terms: { ...tr.terms, ...counterTerms, pendingResponderId: otherParty } };
+    }
+    return { ...tr, status: nextStatus };
+  });
 }

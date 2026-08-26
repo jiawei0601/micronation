@@ -24,12 +24,11 @@ import { resolveTick } from '@micronation/engine';
 import type { D1Database } from '../db/types';
 import {
   getActiveSeasonId,
-  loadWorldState,
+  loadWorldStateVersioned,
   saveWorldState,
   claimTickLease,
   releaseTickLease,
   claimTickSlot,
-  getSeasonVersion,
   finalizeSeasonStmts,
   TICK_RUNNING_STALE_MS,
   type HallOfFameEntry,
@@ -142,23 +141,13 @@ export async function runTick(db: D1Database, opts: RunTickOptions): Promise<Run
   const seasonId = await getActiveSeasonId(db);
   if (!seasonId) return { ranTick: false, skippedReason: 'NO_ACTIVE_SEASON' };
 
-  // ①-9/②-14:同一 Cron 時槽是否已處理過——原本「SELECT 讀 last_tick_slot → 判斷 → 之後才
-  // UPDATE」分兩步,兩個幾乎同時觸發的呼叫都可能讀到「還沒處理過」而都跑下去。改用單一原子
-  // UPDATE...RETURNING(claimTickSlot,見 db/repository.ts 註解)在拿 tick lease 之前先認領——
-  // 認領失敗代表這個時槽已經被(另一次觸發)搶先處理,直接跳過,不需要再去搶 tick lease。
-  // 取捨:slot 在這裡就先認領,若後續整個 tick batch 中途失敗,這個時槽不會被下一次觸發重跑
-  // (寧可漏一個 tick,不要讓非冪等的資源結算/事件寫入跑兩次)。
-  if (opts.scheduledSlot !== undefined) {
-    const claimed = await claimTickSlot(db, seasonId, opts.scheduledSlot);
-    if (!claimed) {
-      return { ranTick: false, seasonId, skippedReason: 'ALREADY_PROCESSED_SLOT' };
-    }
-  }
-
-  // ①-7/②-13:tick lease 的原子取得——單一 UPDATE ... WHERE (未在跑 OR 已 stale) 一次判斷+
-  // 搶佔(claimTickLease,見 db/repository.ts 註解),不再是「先 SELECT 讀狀態 → 再 UPDATE」
-  // 兩步(finding #28 原本的做法仍有 TOCTOU:兩個幾乎同時觸發的 runTick 都可能讀到「未在跑」)。
-  // ownerId 是這次 runTick 執行的隨機身分,release 時只清除 owner 相符的旗標。
+  // ③-5:順序改成「先搶 tick lease,成功後才認領時槽」——原本先 claimTickSlot 再 claimTickLease
+  // 時,若這次觸發搶到了時槽(標記「這個時槽已處理」)、但緊接著搶 lease 失敗(另一個 runTick
+  // 呼叫,例如人工觸發與 cron 幾乎同時)返回 TICK_IN_PROGRESS,這個時槽已經被標記處理過、但
+  // 其實這次呼叫完全沒有真正跑 tick——等於白白燒掉一個時槽,而真正在跑的那個呼叫的結果也不會
+  // 補標記這個時槽(它認的是自己那次觸發對應的 slot,不一定是同一個值)。改成先確保拿到 lease、
+  // 確定自己是唯一在跑的這一個,才去認領時槽——lease 沒搶到就直接跳過,不動 last_tick_slot;
+  // slot 認領失敗(該時槽已被處理過)則釋放剛搶到的 lease 後跳過,不繼續往下跑。
   const ownerId = `owner-${Math.random().toString(36).slice(2)}-${opts.now}`;
   const claimedLease = await claimTickLease(db, seasonId, ownerId, opts.now, TICK_RUNNING_STALE_MS);
   if (!claimedLease) {
@@ -166,10 +155,22 @@ export async function runTick(db: D1Database, opts: RunTickOptions): Promise<Run
     return { ranTick: false, seasonId, skippedReason: 'TICK_IN_PROGRESS' };
   }
 
+  if (opts.scheduledSlot !== undefined) {
+    const claimed = await claimTickSlot(db, seasonId, opts.scheduledSlot);
+    if (!claimed) {
+      // ③-5:時槽已被處理過——這次呼叫不會真正跑 tick,把剛搶到的 lease 讓出來,不留給
+      // finally 塊(finally 只在進入 try 之後才會執行,這裡尚未進入 try)。
+      await releaseTickLease(db, seasonId, ownerId);
+      return { ranTick: false, seasonId, skippedReason: 'ALREADY_PROCESSED_SLOT' };
+    }
+  }
+
   try {
-    const prev = await loadWorldState(db, seasonId);
-    if (!prev) return { ranTick: false, seasonId, skippedReason: 'NO_ACTIVE_SEASON' };
-    const prevVersion = await getSeasonVersion(db, seasonId);
+    // ③-1/③-8:state 與 prevVersion 出自同一次 season row 讀取,不再分開呼叫 getSeasonVersion。
+    const loaded = await loadWorldStateVersioned(db, seasonId);
+    if (!loaded) return { ranTick: false, seasonId, skippedReason: 'NO_ACTIVE_SEASON' };
+    const prev = loaded.state;
+    const prevVersion = loaded.version;
 
     let working = prev;
     const seed = `${seasonId}:${prev.tick}`;

@@ -44,8 +44,9 @@ export const t = {
     goLogin: '前往登入',
     mailSendFailed: '驗證信寄送失敗,可點擊補寄',
     resend: '補寄驗證信',
-    resendSuccess: '已重新寄出驗證信',
+    resendSuccess: '已送出(若信箱存在,將收到驗證信)',
     resendFailed: '補寄失敗,請稍後再試',
+    logout: '登出',
   },
   founding: {
     title: '建國之路',

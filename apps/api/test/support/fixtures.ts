@@ -1,6 +1,6 @@
 import type { BuildingKind, Nation, Region, WorldState, Policies, Treaty, March, MarketOrder } from '@micronation/shared';
 
-const emptyBuildings = (): Record<BuildingKind, number> => ({
+export const emptyBuildings = (): Record<BuildingKind, number> => ({
   farm: 0,
   mine: 0,
   refinery: 0,

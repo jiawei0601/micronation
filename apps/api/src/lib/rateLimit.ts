@@ -9,6 +9,13 @@
 interface Bucket {
   count: number;
   windowStart: number;
+  // ③-9:bucket 記錄自己建立當下用的 windowMs——不同呼叫端(不同 action/未來可能不同限流規則)
+  // 可能用不同的 windowMs 呼叫 checkRateLimit,共用同一個全域 Map。原本 cleanupBuckets 只吃
+  // 「這次呼叫傳入的 windowMs」當作判斷「是否已過視窗」的唯一依據,若某個 bucket 是用比較長
+  // 的 windowMs 建立、之後剛好被一次用較短 windowMs 呼叫的清理觸發,會被誤判成「已過視窗」
+  // 提早清掉(該 IP 的計數被重置,限流形同放寬);反過來也可能讓短視窗的 bucket 因為被較長
+  // windowMs 的清理呼叫检查而遲遲不被回收。每個 bucket 各自記錄、各自按照自己的視窗判斷。
+  windowMs: number;
 }
 
 const buckets = new Map<string, Bucket>();
@@ -23,11 +30,13 @@ const MAX_BUCKETS = 10_000;
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 let lastCleanupAt = 0;
 
-function cleanupBuckets(now: number, windowMs: number): void {
+function cleanupBuckets(now: number): void {
   if (now - lastCleanupAt < CLEANUP_INTERVAL_MS) return;
   lastCleanupAt = now;
+  // ③-9:每個 bucket 按照自己記錄的 windowMs 判斷是否已過視窗,不再共用呼叫端這次傳入的
+  // windowMs(見上方 Bucket.windowMs 註解)。
   for (const [key, bucket] of buckets) {
-    if (now - bucket.windowStart >= windowMs) buckets.delete(key);
+    if (now - bucket.windowStart >= bucket.windowMs) buckets.delete(key);
   }
 }
 
@@ -38,13 +47,17 @@ export interface RateLimitOptions {
 
 /** true = 允許放行;false = 超過限制,呼叫端應回 429。 */
 export function checkRateLimit(key: string, opts: RateLimitOptions, now: number = Date.now()): boolean {
-  cleanupBuckets(now, opts.windowMs);
+  cleanupBuckets(now);
   if (buckets.size >= MAX_BUCKETS && !buckets.has(key)) {
     buckets.clear(); // 硬上限保護——寧可短暫誤放行,不要無界成長吃光 isolate 記憶體。
   }
   const existing = buckets.get(key);
-  if (!existing || now - existing.windowStart >= opts.windowMs) {
-    buckets.set(key, { count: 1, windowStart: now });
+  // ③-9:視窗是否已過期,用「這個 bucket 建立當下記錄的 windowMs」判斷,不是這次呼叫傳入的
+  // opts.windowMs——同一個 key 若曾經被不同 windowMs 的呼叫建立過 bucket(理論上不該發生,
+  // 因為同一個 key 命名空間本該對應固定一種限流規則,但防禦性地不假設呼叫端一定遵守這個
+  // 慣例),沿用 bucket 自己的視窗長度才不會因為呼叫端這次剛好傳了不同的 windowMs 而誤判。
+  if (!existing || now - existing.windowStart >= existing.windowMs) {
+    buckets.set(key, { count: 1, windowStart: now, windowMs: opts.windowMs });
     return true;
   }
   if (existing.count >= opts.max) return false;

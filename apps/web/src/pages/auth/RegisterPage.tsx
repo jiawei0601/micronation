@@ -36,8 +36,10 @@ export function RegisterPage() {
     setResending(true);
     setResendResult(null);
     try {
-      const { mailSent } = await authFn.resend(email);
-      setResendResult(mailSent ? t.auth.resendSuccess : t.auth.resendFailed);
+      // 對齊後端契約:/auth/resend 統一回 202,不因帳號是否存在而有可觀察差異——
+      // 沒有 throw 就視為「已送出(若信箱存在)」,不再讀不存在的 mailSent 欄位。
+      await authFn.resend(email);
+      setResendResult(t.auth.resendSuccess);
     } catch {
       setResendResult(t.auth.resendFailed);
     } finally {

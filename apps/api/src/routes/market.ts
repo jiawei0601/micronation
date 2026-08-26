@@ -70,7 +70,13 @@ marketRoutes.delete('/:id', requireSession, async (c) => {
   // finding #1:撤單走 applyCancelOrder(game/actions.ts)——除了原本的 market.cancelOrder
   // 合法性檢查,還會把掛單時鎖定(escrow)的資源/金錢退回。
   const result = applyCancelOrder(state, nation.id, orderId);
-  if (!result.ok) return c.json({ error: result.error }, result.error === 'FORBIDDEN' ? 403 : 404);
+  if (!result.ok) {
+    // ③-6:cancelOrder 的合法性錯誤(NOT_FOUND/FORBIDDEN)之外,applyCancelOrder 現在還可能因
+    // 退款金額安全整數檢查失敗回傳 RESOURCE_OVERFLOW——這不是「找不到/沒權限」,語意上是
+    // 400(請求本身在目前狀態下無法安全處理),不該落進原本 404 的預設分支。
+    const status = result.error === 'FORBIDDEN' ? 403 : result.error === 'RESOURCE_OVERFLOW' ? 400 : 404;
+    return c.json({ error: result.error }, status);
+  }
 
   const next = result.value.state;
   const now = Date.now();

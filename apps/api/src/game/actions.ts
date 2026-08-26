@@ -34,6 +34,19 @@ function updateNationResources(
   return nations.map((n) => (n.id === nationId ? { ...n, resources: mutate({ ...n.resources }) } : n));
 }
 
+/** ③-6:共用的安全整數不變量檢查——比照 applyPlaceOrder 的 ②-2 檢查(市場撮合結算後驗證所有
+ * 受影響欄位仍是安全整數),抽成可重用的 helper,讓其他「對資源做加減」的路徑(例如撤單退款)
+ * 也套用同一道防線,不必各自重寫一次相同的檢查邏輯。回傳 null 代表結果會溢位(超出
+ * Number.MAX_SAFE_INTEGER 或變成非有限數),呼叫端應視為錯誤,不 apply 這次的變更。 */
+function addResourcesChecked(resources: Nation['resources'], deltas: Partial<Nation['resources']>): Nation['resources'] | null {
+  const next = { ...resources };
+  for (const [k, delta] of Object.entries(deltas) as [ResourceKind, number][]) {
+    next[k] += delta;
+    if (!Number.isSafeInteger(next[k])) return null;
+  }
+  return next;
+}
+
 /** 排入建設佇列——沿用 routes/build.ts 原邏輯(佇列容量/最高等級/資源足額)。
  * finding #5:building/level 邊界檢查——BUILDING_LEVELS 表若查無該 building(理論上不該發生,
  * 呼叫端已有白名單,但 actions.ts 也被 tick-cron 內部呼叫,防禦性補一層)或 level 超出該
@@ -253,14 +266,21 @@ export function applyCancelOrder(state: WorldState, nationId: Id, orderId: Id): 
 
   // cancelOrder 已驗證 target 存在且屬於 nationId(否則會回 Err),这里的 target 必定非 undefined。
   const order = target!;
-  const nations = updateNationResources(state.nations, nationId, (r) => {
-    if (order.side === 'sell') {
-      r[order.kind] += order.qty;
-    } else {
-      r.money += order.qty * order.price;
-    }
-    return r;
-  });
+  const nation = state.nations.find((n) => n.id === nationId);
+  if (!nation) return err('NOT_FOUND');
+
+  // ③-6:退款前先算出「退款金額」本身是否為安全整數(qty × price 理論上可能溢位,同 applyPlaceOrder
+  // 的 notional 檢查),再用共用的 addResourcesChecked 驗證加回去之後的餘額仍是安全整數——原本
+  // 這條路徑完全沒有這道檢查,`r.money += order.qty * order.price` 若溢位會讓後續任何餘額比較
+  // /扣款都算錯,卻沒有任何錯誤訊號。
+  const refundDelta = order.side === 'sell' ? { [order.kind]: order.qty } : { money: order.qty * order.price };
+  for (const v of Object.values(refundDelta)) {
+    if (!Number.isSafeInteger(v as number)) return err('RESOURCE_OVERFLOW');
+  }
+  const refundedResources = addResourcesChecked(nation.resources, refundDelta);
+  if (refundedResources === null) return err('RESOURCE_OVERFLOW');
+
+  const nations = state.nations.map((n) => (n.id === nationId ? { ...n, resources: refundedResources } : n));
 
   return ok({ state: { ...state, orders: result.value.book, nations } });
 }

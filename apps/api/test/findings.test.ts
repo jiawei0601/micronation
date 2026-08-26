@@ -72,7 +72,7 @@ beforeEach(() => {
 describe('finding #1 — 市場成交資源結算(escrow + settle)', () => {
   it('掛賣單即鎖定(escrow)資源;成交後買方得貨、賣方得款(扣關稅)', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-1', regions: [makeRegion({ id: 'region-0' }), makeRegion({ id: 'region-1' })] }), 0);
     const seller = await registerLoginFoundNation(db, env, 'seller@example.com', '賣家國');
     const buyer = await registerLoginFoundNation(db, env, 'buyer@example.com', '買家國');
@@ -130,7 +130,7 @@ describe('finding #1 — 市場成交資源結算(escrow + settle)', () => {
 
   it('撤單退回鎖定的資源(sell 退貨、buy 退錢)', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-2', regions: [makeRegion({ id: 'region-0' })] }), 0);
     const nation = await registerLoginFoundNation(db, env, 'solo@example.com', '獨自國');
 
@@ -231,7 +231,7 @@ describe('finding #8 — 國旗顏色 hex 收緊為 3/6 位', () => {
 describe('finding #9 — JSON body 統一 helper 擋非物件', () => {
   it('body 為陣列 → 400 INVALID_BODY,不是把陣列元素當欄位讀', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-arr', regions: [makeRegion()] }), 0);
     const res = await app.request(
       '/api/auth/register',
@@ -244,7 +244,7 @@ describe('finding #9 — JSON body 統一 helper 擋非物件', () => {
 
   it('body 為 null → 400 INVALID_BODY', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     const res = await app.request(
       '/api/auth/register',
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: 'null' },
@@ -257,7 +257,7 @@ describe('finding #9 — JSON body 統一 helper 擋非物件', () => {
 describe('finding #11 — admin token 固定時間比較,行為正確性', () => {
   it('token 完全相符才通過,長度不同/內容不同一律 401', async () => {
     const db = createTestD1();
-    const env = { DB: db, ADMIN_TOKEN: 'correct-token-value' };
+    const env = { DB: db, ADMIN_TOKEN: 'correct-token-value', ENVIRONMENT: 'test' };
     const wrongLen = await app.request('/api/admin/season', { method: 'POST', headers: { Authorization: 'Bearer short' } }, env);
     expect(wrongLen.status).toBe(401);
     const wrongContent = await app.request(
@@ -272,7 +272,7 @@ describe('finding #11 — admin token 固定時間比較,行為正確性', () =>
 describe('finding #12 — diplomacy propose 驗證 counterpartyId 存在', () => {
   it('counterpartyId 不存在 → 404 COUNTERPARTY_NOT_FOUND', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-dip', tick: 200, regions: [makeRegion({ id: 'region-0' })] }), 0);
     const nation = await registerLoginFoundNation(db, env, 'dip@example.com', '外交國');
 
@@ -293,7 +293,7 @@ describe('finding #12 — diplomacy propose 驗證 counterpartyId 存在', () =>
 describe('finding #13 — diplomacy breach 實際結算賠償+信譽', () => {
   it('毀約方付賠償金給對方,reputation.breaches +1', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     const nA = makeNation({ id: 'n-a', ownerId: 'user-a', regionId: 'region-0', resources: { food: 0, ore: 0, fuel: 0, money: 200 }, reputation: { breaches: 0 } });
     const nB = makeNation({ id: 'n-b', ownerId: 'user-b', regionId: 'region-0', resources: { food: 0, ore: 0, fuel: 0, money: 100 }, reputation: { breaches: 0 } });
     const treaty = makeTreaty({ id: 'treaty-1', aId: 'n-a', bId: 'n-b', status: 'active', terms: { duration: 100, activatedAt: 0, compensation: 40 } });
@@ -313,7 +313,7 @@ describe('finding #13 — diplomacy breach 實際結算賠償+信譽', () => {
 
   it('HTTP /api/diplomacy/breach 實際扣款+加信譽', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-breach2', tick: 200, regions: [makeRegion({ id: 'region-0' })] }), 0);
     const a = await registerLoginFoundNation(db, env, 'breach-a@example.com', 'A國');
     const b = await registerLoginFoundNation(db, env, 'breach-b@example.com', 'B國');
@@ -348,7 +348,9 @@ describe('finding #13 — diplomacy breach 實際結算賠償+信譽', () => {
 
     const aAfter = (await json<{ nation: { resources: { money: number }; reputation: { breaches: number } } }>(await app.request('/api/nation', { headers: { Cookie: a.cookie } }, env)))
       .nation;
-    expect(aAfter.reputation.breaches).toBe(1);
+    // ③-5:breaches 改累加 breachPenalty().reputationDelta 的絕對值(目前固定 10),不再是路由
+    // 硬寫死的 +1——見 routes/diplomacy.ts breach handler 註解。
+    expect(aAfter.reputation.breaches).toBe(10);
     expect(aAfter.resources.money).toBe(500 - 30);
 
     const bAfter = (await json<{ nation: { resources: { money: number } } }>(await app.request('/api/nation', { headers: { Cookie: b.cookie } }, env))).nation;
@@ -359,7 +361,7 @@ describe('finding #13 — diplomacy breach 實際結算賠償+信譽', () => {
 describe('finding #16 — policy axis 白名單擋 __proto__', () => {
   it('axis=__proto__ → 400 INVALID_POLICY(不崩潰、不觸發 prototype 相關行為)', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-proto', tick: 200, regions: [makeRegion({ id: 'region-0' })] }), 0);
     const nation = await registerLoginFoundNation(db, env, 'proto@example.com', '原型國');
 
@@ -388,7 +390,7 @@ describe('finding #18 — 一國一владелец靠 DB 唯一索引', () => {
 describe('finding #20 — 訊息分頁 + 速率限制 + 單調序號', () => {
   it('每國每 tick 超過上限 → 429 RATE_LIMITED', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-msg2', tick: 200, regions: [makeRegion({ id: 'region-0' })] }), 0);
     const a = await registerLoginFoundNation(db, env, 'rate-a@example.com', 'A國');
     const b = await registerLoginFoundNation(db, env, 'rate-b@example.com', 'B國');
@@ -427,7 +429,7 @@ describe('finding #24 — /api/world 回傳 nextCursor', () => {
 describe('finding #25 — 統一 404 handler', () => {
   it('未知路徑回傳 JSON { error: NOT_FOUND },不是 Hono 預設純文字', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     const res = await app.request('/api/does-not-exist', {}, env);
     expect(res.status).toBe(404);
     expect((await json<{ error: string }>(res)).error).toBe('NOT_FOUND');
@@ -437,7 +439,7 @@ describe('finding #25 — 統一 404 handler', () => {
 describe('finding #26 — rankings 同分 tie-breaker(nation id 排序)決定性', () => {
   it('同分數兩次請求排序一致', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     const n1 = makeNation({ id: 'nb', ownerId: 'u1', score: { economy: 5, warfare: 0, tech: 0, diplomacy: 0, total: 5 } });
     const n2 = makeNation({ id: 'na', ownerId: 'u2', score: { economy: 5, warfare: 0, tech: 0, diplomacy: 0, total: 5 } });
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-rank', nations: [n1, n2], regions: [makeRegion({ id: 'region-0' })] }), 0);
@@ -533,7 +535,7 @@ describe('finding #10 — 開季併發靠 DB 唯一索引兜底', () => {
 describe('finding #19 — 玩家初始值集中於 api 層 constants', () => {
   it('開國後的資源/人口/軍力與 game/constants.ts PLAYER_INITIAL_* 一致', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-init', regions: [makeRegion({ id: 'region-0' })] }), 0);
     const nation = await registerLoginFoundNation(db, env, 'init@example.com', '初始國');
     const res = await app.request('/api/nation', { headers: { Cookie: nation.cookie } }, env);
@@ -551,7 +553,7 @@ describe('finding #19 — 玩家初始值集中於 api 層 constants', () => {
 describe('finding #15 — recallMarch 回傳受限視角', () => {
   it('回傳的 marches 不含其他國家精確 size(非涉己者為 sizeTier)', async () => {
     const db = createTestD1();
-    const env = { DB: db };
+    const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-recall', tick: 0, regions: [makeRegion({ id: 'region-0' }), makeRegion({ id: 'region-1' })] }), 0);
     const a = await registerLoginFoundNation(db, env, 'recall-a@example.com', 'A國');
     const b = await registerLoginFoundNation(db, env, 'recall-b@example.com', 'B國');

@@ -6,7 +6,9 @@ import {
   findUserById,
   insertUser,
   markUserVerified,
-  setVerifyToken,
+  insertVerificationToken,
+  findVerificationToken,
+  deleteVerificationTokensForUser,
   insertSession,
   findSession,
   deleteSession,
@@ -51,8 +53,6 @@ export async function register(
     password_salt: salt,
     password_iterations: iterations,
     verified: 0,
-    verify_token: verifyTokenHash,
-    verify_token_expires_at: now + VERIFY_TOKEN_TTL_MS,
     created_at: now,
   };
 
@@ -69,8 +69,18 @@ export async function register(
     throw e;
   }
 
-  // finding #16:寄信失敗(例如 mail provider 暫時不可用)不該讓整個註冊失敗——使用者已經
-  // 寫入 DB,之後可用 /api/auth/resend 補寄。
+  // ③-1:verification_tokens 是多列表(見 db/repository.ts 註解)——插入一列新 token 不會覆寫
+  // 或刪除任何既有列,所以「先寫 token、才寄信」與「先寄信、才寫 token」不再有並發覆蓋的風險
+  // 差異(不像原本 users.verify_token 單欄位那樣覆寫即代表舊 token 失效)。這裡先寫入 token
+  // 列,再嘗試寄信——寄信失敗不影響已寫入的 token(finding #16:使用者已經寫入 DB,之後可用
+  // /api/auth/resend 補寄;那次 resend 會再新增一列,兩列都合法有效)。
+  await insertVerificationToken(db, {
+    token_hash: verifyTokenHash,
+    user_id: userId,
+    expires_at: now + VERIFY_TOKEN_TTL_MS,
+    created_at: now,
+  });
+
   let mailSent = true;
   try {
     await mail.sendVerificationEmail(normalized, verifyToken);
@@ -81,7 +91,12 @@ export async function register(
   return ok({ userId, mailSent });
 }
 
-/** finding #16 補充:idempotent 的重寄驗證信端點——找不到帳號或已驗證就直接回應,不重試寫入。 */
+/** finding #16 補充:idempotent 的重寄驗證信端點——找不到帳號或已驗證就直接回應,不重試寫入。
+ * ③-1:改走 verification_tokens 多列表——每次呼叫都是新增一列,不覆寫任何既有列,兩個幾乎
+ * 同時的 resend 請求(或 register 剛寄信失敗、使用者手動點兩次「重寄」)不會互相覆蓋彼此產生
+ * 的 token,原本單欄位版本「較晚寫入覆蓋較早寫入,較早那次寄出的信裡的 token 就此失效」的
+ * 競態不存在了——不論寄信成功與否都直接插入新列(寄信失敗不影響既有 token,因為天生就不會
+ * 覆蓋)。 */
 export async function resendVerification(
   db: D1Database,
   mail: MailSender,
@@ -93,22 +108,21 @@ export async function resendVerification(
   if (!user) return err('USER_NOT_FOUND');
   if (user.verified) return ok({ mailSent: false });
 
-  // ①-3:原本先把新 token 寫進 DB 再寄信——寄信若失敗(mail provider 暫時不可用),DB 裡的
-  // verify_token 已經被新 token 覆蓋掉,但使用者信箱裡最後一封能收到的其實是「上一次」的舊
-  // token(如果有的話),兩者對不上、使用者手上沒有任何一個當下有效的 token 可用。改成先產生
-  // 新 token、寄信成功之後才寫 DB——寄信失敗時舊 token(若存在且未過期)維持有效,使用者至少
-  // 還能用先前收到的信驗證,不會因為這次重寄失敗反而把原本能用的路徑弄壞。
   const verifyToken = randomHex(16);
   const verifyTokenHash = await sha256Hex(verifyToken);
+
+  await insertVerificationToken(db, {
+    token_hash: verifyTokenHash,
+    user_id: user.id,
+    expires_at: now + VERIFY_TOKEN_TTL_MS,
+    created_at: now,
+  });
 
   let mailSent = true;
   try {
     await mail.sendVerificationEmail(normalized, verifyToken);
   } catch {
     mailSent = false;
-  }
-  if (mailSent) {
-    await setVerifyToken(db, user.id, verifyTokenHash, now + VERIFY_TOKEN_TTL_MS);
   }
   return ok({ mailSent });
 }
@@ -129,6 +143,13 @@ export interface LoginResult {
 }
 
 export async function login(db: D1Database, email: string, password: string, now: number): Promise<Result<LoginResult>> {
+  // ③-3:login 補上 MAX_PASSWORD_LENGTH 檢查——register 已有這道防線(finding #19,PBKDF2 對
+  // 超長輸入的 CPU 放大攻擊),但 login 原本沒有,任何人不需要先註冊過一個超長密碼帳號,
+  // 就能對 login 端點送出巨大的 password 字串,一樣會讓 verifyPassword 內部的 PBKDF2 對超長
+  // 輸入做昂貴的雜湊運算(即使帳號不存在,若 email 存在但密碼超長,仍會先跑到這裡才失敗)。
+  // 在查資料庫、算雜湊之前就先擋掉,不給攻擊者用超長字串消耗運算資源的機會。
+  if (typeof password !== 'string' || password.length > MAX_PASSWORD_LENGTH) return err('INVALID_CREDENTIALS');
+
   const normalized = normalizeEmail(email);
   const user = await findUserByEmail(db, normalized);
   if (!user) return err('INVALID_CREDENTIALS');
@@ -157,21 +178,20 @@ export async function logout(db: D1Database, sessionToken: string): Promise<void
   await deleteSession(db, await sha256Hex(sessionToken));
 }
 
+/** ③-1:改查 verification_tokens 多列表(token_hash 為主鍵,天生只會查到最多一列)——找到、
+ * 未過期就標記使用者已驗證,並刪掉該 user 名下所有 verification_tokens 列(不論驗證時用的是
+ * 哪一個,同一 user 可能因多次 resend 而並存多個仍然有效的 token,驗證成功後全部一次清空,
+ * 避免用剩的 token 繼續可用)。 */
 export async function verifyEmail(db: D1Database, token: string, now: number): Promise<Result<{ userId: string }>> {
   if (!token) return err('INVALID_TOKEN');
-  // finding #17:verify_token(雜湊後)已加索引(migration 0004 idx_users_verify_token),
-  // 全表反查的舊註解不再適用。
-  const user = await findUserByToken(db, await sha256Hex(token));
-  if (!user) return err('INVALID_TOKEN');
+  const tokenRow = await findVerificationToken(db, await sha256Hex(token));
+  if (!tokenRow) return err('INVALID_TOKEN');
   // ①-4:過期判斷改用 <=,呼應 resolveSession 已有的同一原則(finding #20)——expires_at===now
   // 這個邊界時刻視為已過期,不因為「剛好卡在那一毫秒」而放行。
-  if (user.verify_token_expires_at === null || user.verify_token_expires_at <= now) return err('TOKEN_EXPIRED');
-  await markUserVerified(db, user.id);
-  return ok({ userId: user.id });
-}
-
-async function findUserByToken(db: D1Database, tokenHash: string): Promise<UserRow | null> {
-  return db.prepare('SELECT * FROM users WHERE verify_token = ?').bind(tokenHash).first<UserRow>();
+  if (tokenRow.expires_at <= now) return err('TOKEN_EXPIRED');
+  await markUserVerified(db, tokenRow.user_id);
+  await deleteVerificationTokensForUser(db, tokenRow.user_id);
+  return ok({ userId: tokenRow.user_id });
 }
 
 export interface SessionContext {

@@ -53,9 +53,16 @@ interface SeasonRow {
   status: string;
   created_at: number;
   ended_at: number | null;
+  version: number;
 }
 
-export async function loadWorldState(db: D1Database, seasonId: Id): Promise<WorldState | null> {
+interface LoadedWorldState {
+  state: WorldState;
+  /** ③-1/③-8:與 state 出自同一次 season row 讀取的 version——見 loadWorldStateVersioned。 */
+  version: number;
+}
+
+async function loadWorldStateRow(db: D1Database, seasonId: Id): Promise<LoadedWorldState | null> {
   const season = await db
     .prepare('SELECT * FROM seasons WHERE id = ?')
     .bind(seasonId)
@@ -73,7 +80,7 @@ export async function loadWorldState(db: D1Database, seasonId: Id): Promise<Worl
     db.prepare('SELECT * FROM market_orders WHERE season_id = ? ORDER BY id ASC').bind(seasonId).all(),
   ]);
 
-  return {
+  const state: WorldState = {
     seasonId: season.id,
     tick: season.tick,
     nextMarchSeq: season.next_march_seq,
@@ -83,6 +90,26 @@ export async function loadWorldState(db: D1Database, seasonId: Id): Promise<Worl
     treaties: (treatiesRes.results as never[]).map((r) => rowToTreaty(r as never)),
     orders: (ordersRes.results as never[]).map((r) => rowToOrder(r as never)),
   };
+  return { state, version: season.version };
+}
+
+export async function loadWorldState(db: D1Database, seasonId: Id): Promise<WorldState | null> {
+  const loaded = await loadWorldStateRow(db, seasonId);
+  return loaded?.state ?? null;
+}
+
+/**
+ * ③-1/③-8:TOCTOU 收斂——原本 loadActiveWorld/runTick 各自呼叫 loadWorldState(讀 season row
+ * 取得 tick/next_march_seq,但捨棄同一列裡的 version)之後,又另外呼叫一次 getSeasonVersion
+ * (再讀一次 seasons 表取 version)。這兩次讀取之間有一個小窗口——若另一個寫入者(玩家的另一
+ * 個請求、或 tick-cron)剛好在這個窗口內完成一次 saveWorldState(version +1),呼叫端手上的
+ * WorldState 快照(來自第一次讀取)其實已經對應不上它稍後拿到的「版本號」(來自第二次讀取)。
+ * 樂觀鎖檢查用的 expectedVersion 若剛好等於這個「稍後才讀到的新版本」,會誤判成「這次讀到的
+ * state 快照是最新的」而放行寫入,實際上 state 快照仍是舊的——樂觀鎖形同虛設。改成單一次
+ * season row 讀取(loadWorldStateRow)同時取得 state 與 version,兩者保證出自同一個 SELECT,
+ * 不再有分開讀取的窗口。 */
+export async function loadWorldStateVersioned(db: D1Database, seasonId: Id): Promise<LoadedWorldState | null> {
+  return loadWorldStateRow(db, seasonId);
 }
 
 /** finding #10:createSeason 的 INSERT 撞 idx_seasons_one_active(併發開季)時,底層拋出的是
@@ -235,18 +262,32 @@ export async function saveWorldState(
   newEvents.forEach((e, i) => {
     const id = makeId('event', next.seasonId, eventSeqStart + i);
     const row = eventToRow(next.seasonId, id, e, eventCreatedAt);
+    // ③-3/③-4:seq 顯式指定為 claimEventSeqRange 認領到的號碼(不依賴 SQLite 自動配發)——
+    // events.seq 雖宣告 AUTOINCREMENT,SQLite 允許 INSERT 時明確指定 INTEGER PRIMARY KEY 的值
+    // (AUTOINCREMENT 只保證「之後自動配發的值不會小於等於曾經出現過的最大值」,不禁止顯式指定)。
+    // 沿用既有的原子 seq 認領機制(claimEventSeqRange,同一批次內連號),同時讓 events.seq 真正
+    // 是資料庫層面「絕不重複配發」的主鍵,不只是 app 端算出來的一個普通欄位。
+    // ③-3/③-4:events.seq 顯式指定為 eventSeqStart+i+1(1-indexed)——next_event_seq 計數器
+    // 本身從 0 起算(claimEventSeqRange 第一次呼叫回傳 0),若直接把 0 當第一筆事件的 seq,
+    // getEventsSince 的 cursor 語意「since=0 代表尚未看過任何事件」會與「第一筆事件的 seq 恰好
+    // 也是 0」衝突(`seq > 0` 排除掉它,永遠漏掉第一筆)。+1 shift 讓 seq 從 1 起算,呼應原本
+    // rowid-based cursor(rowid 本就從 1 起算)的语意,不影响 next_event_seq 計數器本身的累加。
+    const seq = eventSeqStart + i + 1;
     stmts.push(
       db
         .prepare(
-          'INSERT INTO events (id, season_id, tick, type, nation_ids, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+          'INSERT INTO events (seq, id, season_id, tick, type, nation_ids, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
         )
-        .bind(row.id, row.season_id, row.tick, row.type, row.nation_ids, row.payload, row.created_at)
+        .bind(seq, row.id, row.season_id, row.tick, row.type, row.nation_ids, row.payload, row.created_at)
     );
-    // ①-12/②-17:events_nations 正規化子表——getEventsSince 改走這張表查詢,不再對
-    // events.nation_ids 做 LIKE 全表掃描(也避免 id 恰為另一 id 子字串時的誤配風險)。
+    // ①-12/②-17/③-2/③-4:events_nations 正規化子表——getEventsSince 改走這張表查詢(以
+    // event_seq 為鍵,不再是 event_id),不再對 events.nation_ids 做 LIKE 全表掃描。③-2:補上
+    // season_id,滿足 (season_id, nation_id) → nations(season_id, id) 的複合外鍵。
     for (const nationId of e.nationIds) {
       stmts.push(
-        db.prepare('INSERT OR IGNORE INTO events_nations (event_id, nation_id) VALUES (?, ?)').bind(row.id, nationId)
+        db
+          .prepare('INSERT OR IGNORE INTO events_nations (event_seq, nation_id, season_id) VALUES (?, ?, ?)')
+          .bind(seq, nationId, next.seasonId)
       );
     }
   });
@@ -409,6 +450,16 @@ function diffCollection<T>(
   return stmts;
 }
 
+/** ③-7:單語句(非 batch).run() 的共用成功檢查——D1 對單一 statement 也可能回傳
+ * success:false 而不拋例外(依 driver/後端而定,同 runBatch 開頭註解的理由;insertNewNation
+ * 已對這點有專門處理,見該函式)。這裡收攏其餘「寫入後不特別關心回傳值」的呼叫端,不檢查就
+ * 靜默漏寫,呼叫端(auth/routes)卻以為寫入成功。context 只用於錯誤訊息,方便人工排查是哪個
+ * 呼叫點失敗。 */
+async function runOne(stmt: D1PreparedStatement, context: string): Promise<void> {
+  const res = await stmt.run();
+  if (!res.success) throw new Error(`D1_RUN_FAILED: ${context}`);
+}
+
 // ---- users ----
 
 export interface UserRow {
@@ -418,30 +469,20 @@ export interface UserRow {
   password_salt: string;
   password_iterations: number;
   verified: number;
-  verify_token: string | null;
-  verify_token_expires_at: number | null;
   created_at: number;
 }
 
 export async function insertUser(db: D1Database, row: UserRow): Promise<void> {
-  await db
-    .prepare(
-      `INSERT INTO users
-      (id, email, password_hash, password_salt, password_iterations, verified, verify_token, verify_token_expires_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .bind(
-      row.id,
-      row.email,
-      row.password_hash,
-      row.password_salt,
-      row.password_iterations,
-      row.verified,
-      row.verify_token,
-      row.verify_token_expires_at,
-      row.created_at
-    )
-    .run();
+  await runOne(
+    db
+      .prepare(
+        `INSERT INTO users
+        (id, email, password_hash, password_salt, password_iterations, verified, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(row.id, row.email, row.password_hash, row.password_salt, row.password_iterations, row.verified, row.created_at),
+    `insertUser id=${row.id}`
+  );
 }
 
 export async function findUserByEmail(db: D1Database, normalizedEmail: string): Promise<UserRow | null> {
@@ -453,14 +494,37 @@ export async function findUserById(db: D1Database, id: string): Promise<UserRow 
 }
 
 export async function markUserVerified(db: D1Database, id: string): Promise<void> {
-  await db
-    .prepare('UPDATE users SET verified = 1, verify_token = NULL, verify_token_expires_at = NULL WHERE id = ?')
-    .bind(id)
-    .run();
+  await runOne(db.prepare('UPDATE users SET verified = 1 WHERE id = ?').bind(id), `markUserVerified id=${id}`);
 }
 
-export async function setVerifyToken(db: D1Database, id: string, token: string, expiresAt: number): Promise<void> {
-  await db.prepare('UPDATE users SET verify_token = ?, verify_token_expires_at = ? WHERE id = ?').bind(token, expiresAt, id).run();
+// ---- verification_tokens(③-1)----
+// 多列表取代原本 users.verify_token 單一欄位——見 migrations/0001_init.sql 的表註解:每次
+// 產生驗證 token 都是新增一列,不覆寫既有列,resendVerification 的並發呼叫天生不會互相覆蓋。
+
+export interface VerificationTokenRow {
+  token_hash: string;
+  user_id: string;
+  expires_at: number;
+  created_at: number;
+}
+
+export async function insertVerificationToken(db: D1Database, row: VerificationTokenRow): Promise<void> {
+  await runOne(
+    db
+      .prepare('INSERT INTO verification_tokens (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)')
+      .bind(row.token_hash, row.user_id, row.expires_at, row.created_at),
+    `insertVerificationToken user=${row.user_id}`
+  );
+}
+
+export async function findVerificationToken(db: D1Database, tokenHash: string): Promise<VerificationTokenRow | null> {
+  return db.prepare('SELECT * FROM verification_tokens WHERE token_hash = ?').bind(tokenHash).first<VerificationTokenRow>();
+}
+
+/** verifyEmail 成功後呼叫——刪掉該 user 名下所有 verification_tokens 列(不論驗證時用的是哪
+ * 一個),避免用過的舊 token 或其他仍未過期的並存 token 繼續有效。 */
+export async function deleteVerificationTokensForUser(db: D1Database, userId: string): Promise<void> {
+  await db.prepare('DELETE FROM verification_tokens WHERE user_id = ?').bind(userId).run();
 }
 
 // ---- sessions ----
@@ -473,10 +537,12 @@ export interface SessionRow {
 }
 
 export async function insertSession(db: D1Database, row: SessionRow): Promise<void> {
-  await db
-    .prepare('INSERT INTO sessions (id, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)')
-    .bind(row.id, row.user_id, row.created_at, row.expires_at)
-    .run();
+  await runOne(
+    db
+      .prepare('INSERT INTO sessions (id, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)')
+      .bind(row.id, row.user_id, row.created_at, row.expires_at),
+    `insertSession user=${row.user_id}`
+  );
 }
 
 export async function findSession(db: D1Database, token: string): Promise<SessionRow | null> {
@@ -597,29 +663,35 @@ export async function claimTickLease(
 export async function releaseTickLease(db: D1Database, seasonId: Id, ownerId: string): Promise<void> {
   // ①-8:tick_running_since 是 NOT NULL DEFAULT 0(squash 後的欄位定義),清除旗標時歸零而不是
   // 寫 NULL(會違反 NOT NULL 約束)——0 與 tick_running=0 同時成立時語意就是「未在跑」。
-  await db
-    .prepare('UPDATE seasons SET tick_running = 0, tick_running_since = 0, tick_owner = NULL WHERE id = ? AND tick_owner = ?')
-    .bind(seasonId, ownerId)
-    .run();
+  // ③-7:runOne 檢查的是「這條 UPDATE 語句本身有沒有成功執行」(success flag),不是「有沒有
+  // 剛好命中一列」——0 rows affected(owner 不符,鎖已被接管)本來就是合法情況,不當失敗處理。
+  await runOne(
+    db
+      .prepare('UPDATE seasons SET tick_running = 0, tick_running_since = 0, tick_owner = NULL WHERE id = ? AND tick_owner = ?')
+      .bind(seasonId, ownerId),
+    `releaseTickLease season=${seasonId}`
+  );
 }
 
 /** 舊介面(單純布林寫入,非原子取得)——保留供既有測試/呼叫端(直接模擬「卡死的旗標」)沿用,
  * 新的 runTick 本身改走 claimTickLease/releaseTickLease(見上方)。 */
 export async function setSeasonTickRunning(db: D1Database, seasonId: Id, running: boolean, now: number = Date.now()): Promise<void> {
-  await db
-    .prepare('UPDATE seasons SET tick_running = ?, tick_running_since = ? WHERE id = ?')
-    .bind(running ? 1 : 0, running ? now : 0, seasonId)
-    .run();
+  await runOne(
+    db
+      .prepare('UPDATE seasons SET tick_running = ?, tick_running_since = ? WHERE id = ?')
+      .bind(running ? 1 : 0, running ? now : 0, seasonId),
+    `setSeasonTickRunning season=${seasonId}`
+  );
 }
 
 /** 賽季到期結算——標記 ended,不刪資料(名人堂/歷史查詢仍可能需要)。
  * finding #27:一般情況請改用 finalizeSeason(名人堂+ended 標記同一 batch),這裡保留單獨版本
  * 供其他可能只需要單獨標記 ended、不牽涉名人堂的呼叫端使用(目前無,保留介面對稱性)。 */
 export async function markSeasonEnded(db: D1Database, seasonId: Id, endedAt: number): Promise<void> {
-  await db
-    .prepare("UPDATE seasons SET status = 'ended', ended_at = ? WHERE id = ?")
-    .bind(endedAt, seasonId)
-    .run();
+  await runOne(
+    db.prepare("UPDATE seasons SET status = 'ended', ended_at = ? WHERE id = ?").bind(endedAt, seasonId),
+    `markSeasonEnded season=${seasonId}`
+  );
 }
 
 /** finding #23/#29:scheduled() 用 Cron Trigger 的 scheduledTime 換算出的「目標 tick 時槽」
@@ -633,7 +705,10 @@ export async function getSeasonLastTickSlot(db: D1Database, seasonId: Id): Promi
 }
 
 export async function setSeasonLastTickSlot(db: D1Database, seasonId: Id, slot: number): Promise<void> {
-  await db.prepare('UPDATE seasons SET last_tick_slot = ? WHERE id = ?').bind(slot, seasonId).run();
+  await runOne(
+    db.prepare('UPDATE seasons SET last_tick_slot = ? WHERE id = ?').bind(slot, seasonId),
+    `setSeasonLastTickSlot season=${seasonId}`
+  );
 }
 
 /** ①-9/②-14:同一時槽的「讀 last_tick_slot → 判斷 → 之後才 UPDATE」原本分兩步,兩個幾乎同時
@@ -795,6 +870,16 @@ export interface EventsSinceResult {
  * events_nations(有索引)篩出哪些真的與 nationId 相關——`scannedUpTo` 用「這批掃到的最後一筆
  * rowid」(不論是否涉己)當下次 cursor,呼叫端才不會被一連串跟自己無關的事件卡住。
  */
+/**
+ * ③-3/③-4:改成固定參數量的兩段查詢,取代原本「先撈一批 → 用 IN(?,?,...N筆) 展開成隨 limit
+ * 增長的參數列表」——limit 預設 200(EVENTS_SINCE_LIMIT),原本的寫法在滿頁時會產生
+ * 200+2(nationId + 200 個 event id)= 202 個 bind 參數,雖然目前 SQLite/D1 的單語句參數上限
+ * (SQLITE_LIMIT_VARIABLE_NUMBER,預設常見 999 或更高)還沒被踩到,但參數量隨呼叫端傳入的
+ * limit 線性增長本身就是脆弱的設計(未來調大 limit 或改用其他後端時可能觸頂)。改成:
+ * (1) 先用 season_id+seq 範圍 + LIMIT 決定這批「掃描到」的視窗上界(scannedUpTo),
+ * (2) 再用固定 4 個參數的 JOIN 在同一個視窗內篩出真正涉己的事件——不論 limit 多大,參數量
+ * 恆定,不會隨之增長。
+ */
 export async function getEventsSince(
   db: D1Database,
   seasonId: Id,
@@ -802,24 +887,28 @@ export async function getEventsSince(
   nationId: Id,
   limit: number = EVENTS_SINCE_LIMIT
 ): Promise<EventsSinceResult> {
-  const scanned = await db
-    .prepare('SELECT rowid AS seq, * FROM events WHERE season_id = ? AND rowid > ? ORDER BY rowid ASC LIMIT ?')
+  const windowRow = await db
+    .prepare(
+      `SELECT MAX(seq) AS maxSeq FROM (
+         SELECT seq FROM events WHERE season_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?
+       )`
+    )
     .bind(seasonId, sinceSeq, limit)
-    .all<{ seq: number; id: string }>();
-  const rows = scanned.results;
-  if (rows.length === 0) return { events: [], scannedUpTo: sinceSeq };
+    .first<{ maxSeq: number | null }>();
+  const scannedUpTo = windowRow?.maxSeq ?? sinceSeq;
+  if (scannedUpTo <= sinceSeq) return { events: [], scannedUpTo: sinceSeq };
 
-  const placeholders = rows.map(() => '?').join(', ');
   const matched = await db
-    .prepare(`SELECT event_id FROM events_nations WHERE nation_id = ? AND event_id IN (${placeholders})`)
-    .bind(nationId, ...rows.map((r) => r.id))
-    .all<{ event_id: string }>();
-  const matchedIds = new Set(matched.results.map((r) => r.event_id));
+    .prepare(
+      `SELECT e.seq AS seq, e.* FROM events e
+       JOIN events_nations en ON en.event_seq = e.seq AND en.nation_id = ?
+       WHERE e.season_id = ? AND e.seq > ? AND e.seq <= ?
+       ORDER BY e.seq ASC`
+    )
+    .bind(nationId, seasonId, sinceSeq, scannedUpTo)
+    .all<{ seq: number; id: string }>();
 
-  const events = rows
-    .filter((r) => matchedIds.has(r.id))
-    .map((r) => ({ ...rowToEvent(r as never), seq: r.seq }));
-  const scannedUpTo = rows[rows.length - 1].seq;
+  const events = matched.results.map((r) => ({ ...rowToEvent(r as never), seq: r.seq }));
   return { events, scannedUpTo };
 }
 
@@ -837,12 +926,14 @@ export interface MessageRow {
 }
 
 export async function insertMessage(db: D1Database, row: MessageRow): Promise<void> {
-  await db
-    .prepare(
-      'INSERT INTO messages (id, season_id, from_nation_id, to_nation_id, body, created_at, read_at, tick) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)'
-    )
-    .bind(row.id, row.season_id, row.from_nation_id, row.to_nation_id, row.body, row.created_at, row.tick)
-    .run();
+  await runOne(
+    db
+      .prepare(
+        'INSERT INTO messages (id, season_id, from_nation_id, to_nation_id, body, created_at, read_at, tick) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)'
+      )
+      .bind(row.id, row.season_id, row.from_nation_id, row.to_nation_id, row.body, row.created_at, row.tick),
+    `insertMessage id=${row.id}`
+  );
 }
 
 /** finding #20:訊息 id 的單調遞增序號,比照 claimNextOrderSeq 的原子手法。 */

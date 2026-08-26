@@ -37,12 +37,19 @@ function getMailSender(env: Env): MailSender {
   return env.RESEND_API_KEY ? new ResendMailSender(env.RESEND_API_KEY) : mailSender;
 }
 
-// ②-4:production 卻沒設定 RESEND_API_KEY——見 db/types.ts Env.ENVIRONMENT 註解,Workers
-// 沒有模組載入時的啟動鉤子可用,改成每個請求最前面都檢查,設定缺漏時直接 throw(由下方
-// app.onError 轉成 500),不靜默落回 ConsoleMailSender 讓正式環境的驗證信實際上沒寄出。
+// ③-2(mail fail-closed 反轉):原本只有 ENVIRONMENT==='production' 才要求 RESEND_API_KEY,
+// 其餘一律(包含 ENVIRONMENT 完全沒設定的情況)靜默落回 ConsoleMailSender——這代表
+// wrangler.toml/secret 設定漏掉 ENVIRONMENT=production 這一步時(部署設定疏漏,非刻意選擇),
+// 正式環境的使用者會拿到一個「看起來成功、實際上信根本沒寄出」的假象(ConsoleMailSender 只是
+// console.log,使用者永遠收不到驗證信)。改成白名單制:只有明確標示自己是 development 或
+// test 環境時才允許用 ConsoleMailSender,其餘所有情況(含忘記設定 ENVIRONMENT 這種最危險的
+// 疏漏)一律 fail closed——沒有 RESEND_API_KEY 就直接 500 MAIL_NOT_CONFIGURED,不放行任何
+// 一個請求去用假寄信器蒙混過去。
+const DEV_ENVIRONMENTS = new Set(['development', 'test']);
 app.use('*', async (c, next) => {
-  if (c.env.ENVIRONMENT === 'production' && !c.env.RESEND_API_KEY) {
-    throw new Error('CONFIG_ERROR: RESEND_API_KEY is required when ENVIRONMENT=production');
+  const isDevLike = c.env.ENVIRONMENT !== undefined && DEV_ENVIRONMENTS.has(c.env.ENVIRONMENT);
+  if (!isDevLike && !c.env.RESEND_API_KEY) {
+    throw new Error('MAIL_NOT_CONFIGURED: RESEND_API_KEY is required unless ENVIRONMENT is development or test');
   }
   await next();
 });

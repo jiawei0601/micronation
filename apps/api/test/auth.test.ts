@@ -3,7 +3,7 @@ import { createTestD1 } from './support/sqliteD1Adapter';
 import { register, login, logout, verifyEmail, resolveSession, resendVerification } from '../src/auth/service';
 import { ConsoleMailSender } from '../src/auth/mail';
 import { hashPassword, verifyPassword, sha256Hex, PBKDF2_ITERATIONS, normalizeEmail } from '../src/auth/password';
-import { findUserByEmail, findSession } from '../src/db/repository';
+import { findUserByEmail, findSession, findVerificationToken } from '../src/db/repository';
 
 // finding #1/#13:DB 只存 session/verify_token 的 SHA-256 雜湊,測試沒有真的信箱可以收信,
 // 用 ConsoleMailSender 的 lastToken 取得註冊當下寄出的明文 token。
@@ -71,7 +71,7 @@ describe('auth — register → login → session → logout 全流程', () => {
     const rawToken = mail.lastToken!;
     const row = await findUserByEmail(db, 'verify@example.com');
     expect(row?.verified).toBe(0);
-    expect(row?.verify_token).toBeTruthy();
+    expect(await findVerificationToken(db, await sha256Hex(rawToken))).not.toBeNull();
 
     const badToken = await verifyEmail(db, 'not-the-real-token', now + 1);
     expect(badToken).toEqual({ ok: false, error: 'INVALID_TOKEN' });
@@ -84,7 +84,8 @@ describe('auth — register → login → session → logout 全流程', () => {
 
     const afterVerify = await findUserByEmail(db, 'verify@example.com');
     expect(afterVerify?.verified).toBe(1);
-    expect(afterVerify?.verify_token).toBeNull();
+    // ③-1:驗證成功後,該 user 名下所有 verification_tokens 列都被刪除(見 service.ts verifyEmail)。
+    expect(await findVerificationToken(db, await sha256Hex(rawToken))).toBeNull();
   });
 
   it('密碼超過 256 字元 → PASSWORD_TOO_LONG(finding #19)', async () => {
@@ -114,9 +115,11 @@ describe('auth — register → login → session → logout 全流程', () => {
     expect(second).toEqual({ ok: true, value: { mailSent: true } });
     const secondToken = mail.lastToken!;
 
-    // 重寄後舊 token 失效、新 token 有效(每次重寄都換發新 token)
-    expect(await verifyEmail(db, firstToken, 3)).toEqual({ ok: false, error: 'INVALID_TOKEN' });
-    expect((await verifyEmail(db, secondToken, 3)).ok).toBe(true);
+    // ③-1:verification_tokens 是多列表,每次 resend 都新增一列、不覆寫既有列——firstToken 與
+    // secondToken 皆同時有效(不像原本單欄位版本那樣「較晚寫入覆蓋較早寫入」)。用 firstToken
+    // 驗證成功後,該 user 名下所有列(含 secondToken)一併被刪除,secondToken 隨之失效。
+    expect((await verifyEmail(db, firstToken, 3)).ok).toBe(true);
+    expect(await verifyEmail(db, secondToken, 4)).toEqual({ ok: false, error: 'INVALID_TOKEN' });
   });
 
   it('resend 對不存在的帳號 → USER_NOT_FOUND;對已驗證帳號 → mailSent:false 不重寄', async () => {
@@ -150,13 +153,16 @@ describe('token 雜湊化(finding #1/#13)', () => {
     expect(session).not.toBeNull();
   });
 
-  it('users.verify_token 落地時存的是 SHA-256(token),不是明文', async () => {
+  it('verification_tokens.token_hash 落地時存的是 SHA-256(token),不是明文', async () => {
     const db = createTestD1();
     await register(db, mail, 'hash-verify@example.com', 'password123', 0);
     const rawToken = mail.lastToken!;
-    const row = await findUserByEmail(db, 'hash-verify@example.com');
-    expect(row?.verify_token).not.toBe(rawToken);
-    expect(row?.verify_token).toBe(await sha256Hex(rawToken));
+    // 明文 token 本身查不到(因為主鍵存的是雜湊)
+    expect(await findVerificationToken(db, rawToken)).toBeNull();
+    const hashed = await sha256Hex(rawToken);
+    const tokenRow = await findVerificationToken(db, hashed);
+    expect(tokenRow).not.toBeNull();
+    expect(tokenRow?.token_hash).toBe(hashed);
   });
 });
 

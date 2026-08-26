@@ -74,6 +74,11 @@ export interface UseWorldOptions {
   fetcher?: WorldFetcher;
   /** 是否立即在掛載時拉第一次(測試可關閉以精準控制計時)。預設 true。 */
   immediate?: boolean;
+  /** 身分 key(例如 useNation() 的 nation id,或登入狀態字串)——變化時自動呼叫 resetWorld()
+   *  並重新拉取,防止換帳號後沿用前一個身分累積的 events/游標(跨帳號事件外洩)。首次掛載
+   *  不視為「變化」,不會多打一次。未提供時不啟用自動偵測,由呼叫端自行在登入/登出/建國成功
+   *  時手動呼叫 resetWorld()。 */
+  identityKey?: string | null;
 }
 
 export interface UseWorldResult {
@@ -85,10 +90,13 @@ export interface UseWorldResult {
   error: string | null;
   refresh: () => void;
   markEventsSeen: () => void;
+  /** 清空累積的 world/events/游標/已讀記錄,回到初始狀態(不含 loading/refetch)。
+   *  用於登入成功、登出、建國成功等「身分切換」時機,避免沿用前一個身分的事件(finding:跨帳號事件外洩)。 */
+  resetWorld: () => void;
 }
 
 export function useWorld(options: UseWorldOptions = {}): UseWorldResult {
-  const { intervalMs = WORLD_POLL_INTERVAL_MS, fetcher = defaultFetcher, immediate = true } = options;
+  const { intervalMs = WORLD_POLL_INTERVAL_MS, fetcher = defaultFetcher, immediate = true, identityKey } = options;
 
   const [world, setWorld] = useState<PublicWorldView | null>(null);
   const [events, setEvents] = useState<IdentifiedEvent[]>([]);
@@ -163,6 +171,29 @@ export function useWorld(options: UseWorldOptions = {}): UseWorldResult {
     void poll();
   }, [poll]);
 
+  const resetWorld = useCallback(() => {
+    // 讓任何仍在飛行中的舊請求(前一個身分發出的)回來後被丟棄,不會覆蓋重置後的狀態。
+    seqRef.current += 1;
+    abortRef.current?.abort();
+    sinceSeqRef.current = 0;
+    seenSeqsRef.current = new Set();
+    setWorld(null);
+    setEvents([]);
+    setError(null);
+    setSeenEventId(null);
+  }, []);
+
+  // identityKey 變化(例如換帳號登入、登出、建國成功後拿到新 nation id)時自動重置——
+  // 不會在首次掛載時觸發(prevIdentityKeyRef 初始值就是當下的 identityKey)。
+  const prevIdentityKeyRef = useRef<string | null | undefined>(identityKey);
+  useEffect(() => {
+    if (prevIdentityKeyRef.current === identityKey) return;
+    prevIdentityKeyRef.current = identityKey;
+    resetWorld();
+    void poll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [identityKey]);
+
   const markEventsSeen = useCallback(() => {
     setSeenEventId(events.length > 0 ? events[events.length - 1].id : null);
   }, [events]);
@@ -173,7 +204,7 @@ export function useWorld(options: UseWorldOptions = {}): UseWorldResult {
     return idx === -1 ? events.length : events.length - 1 - idx;
   }, [events, seenEventId]);
 
-  return { world, events, unseenCount, loading, error, refresh, markEventsSeen };
+  return { world, events, unseenCount, loading, error, refresh, markEventsSeen, resetWorld };
 }
 
 export const mockViewerId = MOCK_VIEWER_ID;

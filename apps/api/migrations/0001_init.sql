@@ -55,12 +55,23 @@ CREATE TABLE users (
   password_salt TEXT NOT NULL,       -- hex,隨機
   password_iterations INTEGER NOT NULL,
   verified INTEGER NOT NULL DEFAULT 0, -- 0/1,供 market NationCtx.verified
-  verify_token TEXT,                 -- 待確認的驗證信 token,SHA-256 雜湊後存(確認後清空)
-  verify_token_expires_at INTEGER,
   created_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX idx_users_email ON users(email);
-CREATE INDEX idx_users_verify_token ON users(verify_token);
+
+-- ③-1:原本驗證 token 只存在 users.verify_token 單一欄位——resendVerification 每次呼叫都是
+-- 「產生新 token → 覆蓋掉舊 token」,兩個幾乎同時的 resend 請求(或 register 剛寄信失敗、
+-- 使用者手動點了兩次「重寄」)彼此互相覆蓋,較晚寫入的那個覆蓋較早的,較早那次呼叫寄出的信
+-- 裡的 token 就此失效,即使那次寄信其實成功送達。改成多列表:每次產生 token 都是新增一列,
+-- 不覆寫任何既有列,天生免疫這種競態——多個同時有效的 token 並存完全合法(使用者用哪一封
+-- 信裡的都能驗證成功),驗證成功後一次刪光該 user 的所有列(不論用的是哪一個)。
+CREATE TABLE verification_tokens (
+  token_hash TEXT PRIMARY KEY,       -- SHA-256(token),不落地明文
+  user_id TEXT NOT NULL REFERENCES users(id),
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX idx_verification_tokens_user ON verification_tokens(user_id);
 
 CREATE TABLE sessions (
   id TEXT PRIMARY KEY,               -- session token 的 SHA-256 雜湊(不落地明文)
@@ -177,7 +188,8 @@ CREATE INDEX idx_marches_arrives ON marches(season_id, arrives_at);
 CREATE UNIQUE INDEX idx_marches_season_id ON marches(season_id, id);
 
 CREATE TABLE events (
-  id TEXT PRIMARY KEY,
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
   season_id TEXT NOT NULL REFERENCES seasons(id),
   tick INTEGER NOT NULL,
   type TEXT NOT NULL,                 -- EventType
@@ -188,15 +200,15 @@ CREATE TABLE events (
 CREATE INDEX idx_events_tick ON events(season_id, tick);
 CREATE INDEX idx_events_type ON events(season_id, type);
 
--- ①-12/②-17:events.nation_ids 的 LIKE 查詢改走正規化子表——getEventsSince 原本
--- `nation_ids LIKE '%"<id>"%'` 全表掃描且理論上有跨欄位誤配風險(id 恰為另一 id 子字串時),
--- 改成 JOIN 這張表,配合 (nation_id, event 的 rowid) 索引縮小掃描範圍。
+-- events_nations
 CREATE TABLE events_nations (
-  event_id TEXT NOT NULL REFERENCES events(id),
+  event_seq INTEGER NOT NULL REFERENCES events(seq),
   nation_id TEXT NOT NULL,
-  PRIMARY KEY (event_id, nation_id)
+  season_id TEXT NOT NULL,
+  PRIMARY KEY (event_seq, nation_id),
+  FOREIGN KEY (season_id, nation_id) REFERENCES nations(season_id, id)
 );
-CREATE INDEX idx_events_nations_nation ON events_nations(nation_id, event_id);
+CREATE INDEX idx_events_nations_nation ON events_nations(nation_id, event_seq);
 
 -- 教學進度(每 user 逐項任務狀態)
 CREATE TABLE tasks (
