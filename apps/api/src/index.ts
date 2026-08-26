@@ -78,6 +78,12 @@ app.post('/api/auth/register', async (c) => {
   const result = await register(c.env.DB, getMailSender(c.env), email, password, now);
   if (!result.ok) return c.json({ error: result.error }, 400);
   await safeCompleteTask(c.env.DB, result.value.userId, 'register', now);
+  // 註冊成功即發 session——否則前端 register→/founding 會 401(2026-08-26 上線首日實測)。
+  // 重用 login() 建 session(多一次 PBKDF2 驗證,換取不繞過任何既有安全路徑)。
+  const session = await login(c.env.DB, email, password, now);
+  if (session.ok) {
+    c.header('Set-Cookie', buildSessionCookie(session.value.sessionToken, session.value.expiresAt, now));
+  }
   return c.json({ userId: result.value.userId, mailSent: result.value.mailSent }, 201);
 });
 
