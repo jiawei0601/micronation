@@ -50,7 +50,7 @@ marketRoutes.post('/', requireSession, async (c) => {
   const now = Date.now();
   // finding #1/#3:成交後的資源結算已在 applyPlaceOrder 內完成(next.nations 已含最新餘額),
   // trades 隨同 nations/orders 差異一起交給 persistWorld,同一 batch 原子寫入。
-  await persistWorld(c.env.DB, state, next, [], now, result.value.trades);
+  await persistWorld(c.env.DB, state, next, [], now, result.value.trades, world.version);
   await safeCompleteTask(c.env.DB, user.id, 'place_order', now);
 
   return c.json({ book: next.orders, trades: result.value.trades, unbanded: result.value.unbanded }, 201);
@@ -74,7 +74,7 @@ marketRoutes.delete('/:id', requireSession, async (c) => {
 
   const next = result.value.state;
   const now = Date.now();
-  await persistWorld(c.env.DB, state, next, [], now);
+  await persistWorld(c.env.DB, state, next, [], now, [], world.version);
   await safeCompleteTask(c.env.DB, user.id, 'cancel_order', now);
 
   return c.json({ book: next.orders });

@@ -1,4 +1,4 @@
-import { Link } from 'react-router-dom';
+import { Link, Navigate } from 'react-router-dom';
 import { Flag } from '../components/flag/Flag';
 import { WorldMap } from '../components/WorldMap';
 import { StatusNotice } from '../components/panel/PanelKit';
@@ -18,11 +18,26 @@ const DOCK_LINKS: { to: string; label: string }[] = [
 
 /** C 風地圖主殼——登入後主畫面。SVG 地圖+國庫/內政 HUD+警報流+功能 dock。 */
 export function MapShell() {
-  const { world, events, loading, error } = useWorldContext();
-  const { nation, loading: nationLoading, hasNation } = useNation();
+  const { world, events, loading, error, unseenCount, markEventsSeen } = useWorldContext();
+  const { nation, status: nationStatus, error: nationError, refresh: refreshNation } = useNation();
 
-  // 找不到自己的國家時,不准 fallback 到 nations[0](那是別人的國家)——導向開國流程。
-  if (!nationLoading && !hasNation) {
+  // finding #6/#12:三態分離——401 導 /login,一般錯誤顯示重試,未建國才是 CTA(不可混為一談)。
+  if (nationStatus === 'unauthenticated') {
+    return <Navigate to="/login" replace />;
+  }
+  if (nationStatus === 'error') {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-chart-bg text-[#dce8f2]">
+        <div className="rounded-xl border border-chart-border bg-[rgba(13,32,46,0.9)] p-8 text-center">
+          <p className="mb-4 text-sm text-[#ff8f88]">{t.common.error}: {nationError}</p>
+          <button type="button" onClick={refreshNation} className="rounded bg-chart-blue px-4 py-2 text-sm">
+            {t.common.retry}
+          </button>
+        </div>
+      </div>
+    );
+  }
+  if (nationStatus === 'no-nation') {
     return (
       <div className="flex min-h-screen items-center justify-center bg-chart-bg text-[#dce8f2]">
         <div className="rounded-xl border border-chart-border bg-[rgba(13,32,46,0.9)] p-8 text-center">
@@ -90,13 +105,23 @@ export function MapShell() {
         ) : null}
       </aside>
 
-      <div className="absolute right-5 top-16 z-10 w-72 space-y-2">
+      <button
+        type="button"
+        onClick={markEventsSeen}
+        className="absolute right-5 top-16 z-10 w-72 space-y-2 text-left"
+        aria-label={unseenCount > 0 ? `${unseenCount} 則未讀事件,點擊標記已讀` : '無未讀事件'}
+      >
         {events.slice(-3).map((e) => (
-          <div key={e.id} className="rounded-r-lg border-l-4 border-chart-blue bg-[rgba(13,32,46,0.85)] px-3 py-2 text-xs">
+          <div
+            key={e.id}
+            className={`rounded-r-lg border-l-4 bg-[rgba(13,32,46,0.85)] px-3 py-2 text-xs ${
+              unseenCount > 0 ? 'border-[#e5534b]' : 'border-chart-blue'
+            }`}
+          >
             {e.type} · tick {e.tick}
           </div>
         ))}
-      </div>
+      </button>
 
       {error ? (
         <div className="absolute right-5 bottom-24 z-10 w-72">

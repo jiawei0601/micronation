@@ -47,6 +47,36 @@ function parseJson<T>(table: string, rowId: string, field: string, raw: string):
   }
 }
 
+/** ①-14:parseJson 只保證「是合法 JSON」,不保證形狀對——手改 DB/未來 migration bug 可能寫入
+ * 語法合法但結構錯誤的值(例如 buildings 存成陣列、score 缺欄位),下游業務邏輯拿到型別上宣稱
+ * 是 `Record<BuildingKind, number>` 實際上是別的東西的值,會在很後面才因為 undefined 運算炸掉、
+ * 錯誤訊息與這裡的壞資料完全對不上。加一層淺層 shape 驗證(頂層型別 + 必要鍵),不合就視同
+ * CorruptRowError,在最靠近資料來源的地方 fail fast。 */
+function parseJsonShaped<T>(
+  table: string,
+  rowId: string,
+  field: string,
+  raw: string,
+  validate: (value: unknown) => boolean
+): T {
+  const value = parseJson<unknown>(table, rowId, field, raw);
+  if (!validate(value)) throw new CorruptRowError(table, rowId, field);
+  return value as T;
+}
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+const isRecordOfNumbers = (v: unknown): boolean => isPlainObject(v) && Object.values(v).every((x) => typeof x === 'number');
+const isRecordOfStrings = (v: unknown): boolean => isPlainObject(v) && Object.values(v).every((x) => typeof x === 'string');
+
+const isBuildQueue = (v: unknown): boolean =>
+  Array.isArray(v) &&
+  v.every((item) => isPlainObject(item) && typeof item.building === 'string' && typeof item.completesAt === 'number');
+
+const SCORE_KEYS = ['economy', 'warfare', 'tech', 'diplomacy', 'total'] as const;
+const isScore = (v: unknown): boolean =>
+  isPlainObject(v) && SCORE_KEYS.every((k) => typeof v[k] === 'number');
+
 function assertEnum<T extends string>(
   table: string,
   rowId: string,
@@ -146,14 +176,14 @@ export function rowToNation(r: NationRow): Nation {
     actionPoints: r.action_points,
     population: r.population,
     morale: r.morale,
-    buildings: parseJson('nations', r.id, 'buildings', r.buildings),
-    buildQueue: parseJson('nations', r.id, 'build_queue', r.build_queue),
+    buildings: parseJsonShaped('nations', r.id, 'buildings', r.buildings, isRecordOfNumbers),
+    buildQueue: parseJsonShaped('nations', r.id, 'build_queue', r.build_queue, isBuildQueue),
     army: { size: r.army_size },
-    policies: parseJson('nations', r.id, 'policies', r.policies),
-    policyChangedAt: parseJson('nations', r.id, 'policy_changed_at', r.policy_changed_at),
+    policies: parseJsonShaped('nations', r.id, 'policies', r.policies, isRecordOfStrings),
+    policyChangedAt: parseJsonShaped('nations', r.id, 'policy_changed_at', r.policy_changed_at, isRecordOfNumbers),
     reputation: { breaches: r.reputation_breaches },
     protectedUntil: r.protected_until,
-    score: parseJson('nations', r.id, 'score', r.score),
+    score: parseJsonShaped('nations', r.id, 'score', r.score, isScore),
     createdAt: r.created_at,
   };
   if (r.last_attacked_at !== null) nation.lastAttackedAt = r.last_attacked_at;

@@ -26,11 +26,11 @@ import {
   getActiveSeasonId,
   loadWorldState,
   saveWorldState,
-  getSeasonTickRunningState,
-  setSeasonTickRunning,
-  finalizeSeason,
-  getSeasonLastTickSlot,
-  setSeasonLastTickSlot,
+  claimTickLease,
+  releaseTickLease,
+  claimTickSlot,
+  getSeasonVersion,
+  finalizeSeasonStmts,
   TICK_RUNNING_STALE_MS,
   type HallOfFameEntry,
 } from '../db/repository';
@@ -95,7 +95,14 @@ function sortByScoreDesc<T extends { id: Id }>(nations: T[], key: (n: T) => numb
   return [...nations].sort((a, b) => key(b) - key(a) || a.id.localeCompare(b.id));
 }
 
+/** ②-16:空國家列表防禦——理論上賽季到期時至少會有 NPC 國家,但防禦性地處理「這個賽季一個
+ * 國家都沒有」的邊界情況(例如測試直接建一個沒有任何 nation 的賽季就跑到 SEASON_LENGTH_TICKS)。
+ * 原本 `sortByScoreDesc(...)[0]` 在空陣列時回傳 undefined,後面 `winner.id` 會直接丟未預期的
+ * TypeError,讓賽季結算整個中斷、名人堂完全沒寫入。改成沒有國家時直接回空陣列——名人堂本來就
+ * 沒有任何名次可寫,合理的結果就是「沒有條目」,不是讓 runTick 拋例外。 */
 function buildHallOfFameEntries(seasonId: Id, nations: Nation[]): HallOfFameEntry[] {
+  if (nations.length === 0) return [];
+
   const entries: HallOfFameEntry[] = [];
 
   const byTotal = sortByScoreDesc(nations, (n) => n.score.total).slice(0, 3);
@@ -135,32 +142,34 @@ export async function runTick(db: D1Database, opts: RunTickOptions): Promise<Run
   const seasonId = await getActiveSeasonId(db);
   if (!seasonId) return { ranTick: false, skippedReason: 'NO_ACTIVE_SEASON' };
 
-  // finding #23/#29:同一 Cron 時槽已經跑過就跳過(冪等)——在拿 tick_running 鎖之前先判斷,
-  // 避免 Cloudflare 偶發重試同一次觸發時白搶一次鎖又立刻放掉。
+  // ①-9/②-14:同一 Cron 時槽是否已處理過——原本「SELECT 讀 last_tick_slot → 判斷 → 之後才
+  // UPDATE」分兩步,兩個幾乎同時觸發的呼叫都可能讀到「還沒處理過」而都跑下去。改用單一原子
+  // UPDATE...RETURNING(claimTickSlot,見 db/repository.ts 註解)在拿 tick lease 之前先認領——
+  // 認領失敗代表這個時槽已經被(另一次觸發)搶先處理,直接跳過,不需要再去搶 tick lease。
+  // 取捨:slot 在這裡就先認領,若後續整個 tick batch 中途失敗,這個時槽不會被下一次觸發重跑
+  // (寧可漏一個 tick,不要讓非冪等的資源結算/事件寫入跑兩次)。
   if (opts.scheduledSlot !== undefined) {
-    const lastSlot = await getSeasonLastTickSlot(db, seasonId);
-    if (lastSlot !== null && lastSlot >= opts.scheduledSlot) {
+    const claimed = await claimTickSlot(db, seasonId, opts.scheduledSlot);
+    if (!claimed) {
       return { ranTick: false, seasonId, skippedReason: 'ALREADY_PROCESSED_SLOT' };
     }
   }
 
-  // finding #28:tick_running 旗標若已在跑「且未逾時」才視為重入,擋下本輪；若旗標雖然是 true
-  // 但已超過 TICK_RUNNING_STALE_MS 沒更新(前一輪 runTick 中途被強制終止、finally 沒機會清
-  // 旗標),視為 stale、本輪可以接管——否則旗標會卡死,永遠擋住後續所有 tick 與玩家寫入路由。
-  const { running, since } = await getSeasonTickRunningState(db, seasonId);
-  const stale = running && since !== null && opts.now - since > TICK_RUNNING_STALE_MS;
-  if (running && !stale) {
+  // ①-7/②-13:tick lease 的原子取得——單一 UPDATE ... WHERE (未在跑 OR 已 stale) 一次判斷+
+  // 搶佔(claimTickLease,見 db/repository.ts 註解),不再是「先 SELECT 讀狀態 → 再 UPDATE」
+  // 兩步(finding #28 原本的做法仍有 TOCTOU:兩個幾乎同時觸發的 runTick 都可能讀到「未在跑」)。
+  // ownerId 是這次 runTick 執行的隨機身分,release 時只清除 owner 相符的旗標。
+  const ownerId = `owner-${Math.random().toString(36).slice(2)}-${opts.now}`;
+  const claimedLease = await claimTickLease(db, seasonId, ownerId, opts.now, TICK_RUNNING_STALE_MS);
+  if (!claimedLease) {
     console.log(`[tick] season ${seasonId} already has a tick in progress — skipping this run`);
     return { ranTick: false, seasonId, skippedReason: 'TICK_IN_PROGRESS' };
   }
-  if (stale) {
-    console.warn(`[tick] season ${seasonId} tick_running flag was stale (since=${since}) — taking over`);
-  }
 
-  await setSeasonTickRunning(db, seasonId, true, opts.now);
   try {
     const prev = await loadWorldState(db, seasonId);
     if (!prev) return { ranTick: false, seasonId, skippedReason: 'NO_ACTIVE_SEASON' };
+    const prevVersion = await getSeasonVersion(db, seasonId);
 
     let working = prev;
     const seed = `${seasonId}:${prev.tick}`;
@@ -189,22 +198,20 @@ export async function runTick(db: D1Database, opts: RunTickOptions): Promise<Run
 
     const { state: resolved, events } = resolveTick(working, seed);
 
-    // finding #27:先把「最後一 tick 的狀態」落地(saveWorldState),成功之後才寫名人堂+標記
-    // ended——原本順序反過來時,若 saveWorldState 中途失敗,DB 會出現「名人堂已經寫了,但
-    // 對應的最終分數/資源其實沒真的存進去」這種不一致。hall_of_fame 寫入與
-    // seasons.status='ended' 合成單一 batch(finalizeSeason)一起原子提交。
-    await saveWorldState(db, prev, resolved, events, opts.now, collectedTrades);
-    if (opts.scheduledSlot !== undefined) await setSeasonLastTickSlot(db, seasonId, opts.scheduledSlot);
-
-    let seasonEnded = false;
-    if (resolved.tick >= SEASON_LENGTH_TICKS) {
-      seasonEnded = true;
-      const entries = buildHallOfFameEntries(seasonId, resolved.nations);
-      await finalizeSeason(db, seasonId, entries, opts.now);
-    }
+    // finding #27/②-15:「最後一 tick 的狀態落地」與「名人堂 + ended 標記」原本是兩次獨立的
+    // runBatch 呼叫(即使已經調整過順序,兩次呼叫之間仍有極小窗口)。現在 saveWorldState 支援
+    // extraStmts,賽季到期時把 finalizeSeasonStmts(hall_of_fame 寫入 + status='ended')併入
+    // 同一個 batch,一次性原子提交——不會出現「tick 狀態已存但名人堂沒寫」或反過來的不一致。
+    const seasonEnded = resolved.tick >= SEASON_LENGTH_TICKS;
+    const extraStmts = seasonEnded
+      ? finalizeSeasonStmts(db, seasonId, buildHallOfFameEntries(seasonId, resolved.nations), opts.now)
+      : [];
+    await saveWorldState(db, prev, resolved, events, opts.now, collectedTrades, prevVersion, extraStmts);
 
     return { ranTick: true, seasonId, seasonEnded, eventCount: events.length };
   } finally {
-    await setSeasonTickRunning(db, seasonId, false, opts.now);
+    // ①-7:只清除 owner 與自己相符的旗標(見 claimTickLease/releaseTickLease 註解)——若這把鎖
+    // 已經因為 stale-takeover 被別的 runTick 接管,這裡不該誤放行接管者尚未跑完的那一輪。
+    await releaseTickLease(db, seasonId, ownerId);
   }
 }

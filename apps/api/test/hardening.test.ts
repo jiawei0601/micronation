@@ -269,16 +269,16 @@ describe('finding #9 — getEventsSince 用 seq(rowid)當 cursor,不漏同 tick 
     // 同一 tick(=5)分兩批寫入,涉及同一個 nationId
     await saveWorldState(db, world, world, [{ tick: 5, type: 'production_tick', nationIds: ['nation-1'], payload: { a: 1 } }], 0);
     const firstBatch = await getEventsSince(db, 'season-cursor', 0, 'nation-1');
-    expect(firstBatch).toHaveLength(1);
-    const cursor = firstBatch[0].seq;
+    expect(firstBatch.events).toHaveLength(1);
+    const cursor = firstBatch.scannedUpTo;
 
     await saveWorldState(db, world, world, [{ tick: 5, type: 'population_change', nationIds: ['nation-1'], payload: { b: 2 } }], 0);
 
     // 用舊版「tick > sinceTick」邏輯:sinceTick=5(上次拿到的最大 tick),tick=5 的新事件會被
     // `tick > 5` 擋掉(漏掉)。新版用 seq cursor,不會漏。
     const secondBatch = await getEventsSince(db, 'season-cursor', cursor, 'nation-1');
-    expect(secondBatch).toHaveLength(1);
-    expect(secondBatch[0].type).toBe('population_change');
+    expect(secondBatch.events).toHaveLength(1);
+    expect(secondBatch.events[0].type).toBe('population_change');
   });
 
   it('LIMIT 生效:超過 EVENTS_SINCE_LIMIT 的事件只回傳上限筆數', async () => {
@@ -295,7 +295,7 @@ describe('finding #9 — getEventsSince 用 seq(rowid)當 cursor,不漏同 tick 
     await saveWorldState(db, world, world, many, 0);
 
     const events = await getEventsSince(db, 'season-many-events', 0, 'nation-1');
-    expect(events.length).toBe(EVENTS_SINCE_LIMIT);
+    expect(events.events.length).toBe(EVENTS_SINCE_LIMIT);
   });
 });
 

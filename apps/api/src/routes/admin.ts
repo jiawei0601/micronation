@@ -43,8 +43,20 @@ adminRoutes.post('/season', async (c) => {
   const existing = await getActiveSeasonId(c.env.DB);
   if (existing) return c.json({ error: 'SEASON_ALREADY_ACTIVE' }, 409);
 
-  const body = (await parseJsonBody<{ name?: string; npcCount?: number }>(c.req)) ?? {};
-  const npcCount = Number.isSafeInteger(body.npcCount) && (body.npcCount as number) >= 0 ? (body.npcCount as number) : DEFAULT_NPC_COUNT;
+  // ②-12:原本壞 JSON(parseJsonBody 回 null)被 `?? {}` 悄悄吞成「空物件、全用預設值」,呼叫端
+  // 手滑傳了格式錯誤的 body 也看不出來、開季照樣成功但用了它沒打算要的預設值。壞 body 一律 400,
+  // 呼叫端要用預設值就明確傳 `{}`(空物件是合法 body,不是 null)。
+  const body = await parseJsonBody<{ name?: string; npcCount?: number }>(c.req);
+  if (body === null) return c.json({ error: 'INVALID_BODY' }, 400);
+  // ②-11:NPC 數量上限——generateNpcNations 依 npcCount 逐一產生 NPC 國家並各自分配 region/初始
+  // 資源,沒有上限時一個惡意/手滑的超大 npcCount(例如打錯多打幾個 0)會在單一請求內產生海量
+  // 插入語句,拖垮這次 createSeason 的 batch 甚至撐爆 D1 單次 batch 大小限制。50 為保守上限,
+  // 遠高於 DEFAULT_NPC_COUNT(8)但足以擋下明顯異常的輸入。
+  const NPC_COUNT_MAX = 50;
+  const npcCount =
+    Number.isSafeInteger(body.npcCount) && (body.npcCount as number) >= 0 && (body.npcCount as number) <= NPC_COUNT_MAX
+      ? (body.npcCount as number)
+      : DEFAULT_NPC_COUNT;
 
   const now = Date.now();
   const seasonId = makeId('season', now);

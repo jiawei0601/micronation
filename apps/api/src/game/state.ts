@@ -3,13 +3,15 @@
 
 import type { WorldState, Nation, Id, GameEvent, Trade } from '@micronation/shared';
 import type { D1Database } from '../db/types';
-import { loadWorldState, saveWorldState, getActiveSeasonId, getSeasonTickRunning } from '../db/repository';
+import { loadWorldState, saveWorldState, getActiveSeasonId, getSeasonTickRunning, getSeasonVersion } from '../db/repository';
 
 export interface ActiveWorld {
   seasonId: Id;
   state: WorldState;
   /** true = tick-cron(M8 runTick)正在跑本賽季。寫入路由須在套用變更前檢查,進行中回 503。 */
   tickRunning: boolean;
+  /** ①-6:讀取當下的 seasons.version——寫回時(persistWorld)須帶著這個值做樂觀鎖檢查。 */
+  version: number;
 }
 
 /**
@@ -21,8 +23,8 @@ export async function loadActiveWorld(db: D1Database): Promise<ActiveWorld | nul
   if (!seasonId) return null;
   const state = await loadWorldState(db, seasonId);
   if (!state) return null;
-  const tickRunning = await getSeasonTickRunning(db, seasonId);
-  return { seasonId, state, tickRunning };
+  const [tickRunning, version] = await Promise.all([getSeasonTickRunning(db, seasonId), getSeasonVersion(db, seasonId)]);
+  return { seasonId, state, tickRunning, version };
 }
 
 export function findOwnNation(state: WorldState, userId: Id): Nation | null {
@@ -47,10 +49,14 @@ export async function persistWorld(
   next: WorldState,
   events: GameEvent[],
   now: number,
-  trades: Trade[] = []
+  trades: Trade[] = [],
+  expectedVersion?: number
 ): Promise<void> {
   // finding #3:trades 與 nations/orders/events 一併交給 saveWorldState 的同一個 D1 batch,
   // 不再由 applyPlaceOrder 各自獨立呼叫 insertTrades——避免「trades 已落地但 nations/orders
   // 的差異寫回失敗」這種半吊子中間狀態。
-  await saveWorldState(db, prev, next, events, now, trades);
+  // ①-6:expectedVersion 帶入時(所有玩家寫入路由都應該帶,見 loadActiveWorld().version)做
+  // 樂觀鎖檢查——版本不符時 saveWorldState 丟 ConflictError,呼叫端(routes)不吞這個例外,
+  // 讓 index.ts onError 統一轉譯成 409 { error: 'CONFLICT', retry: true }。
+  await saveWorldState(db, prev, next, events, now, trades, expectedVersion);
 }

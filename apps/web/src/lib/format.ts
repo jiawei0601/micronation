@@ -21,9 +21,10 @@ export function formatDelta(n: number): string {
   return '0';
 }
 
-/** 百分比顯示,input 為 0~1 小數。ratio 非有限數,或 digits 非 0~10 的非負整數,一律回傳 '—'。 */
+/** 百分比顯示,input 為 0~1 小數。ratio 非有限數、|ratio| 超過 1e6(異常溢位,非正常業務數值),
+ *  或 digits 非 0~10 的非負整數,一律回傳 '—'。 */
 export function formatPercent(ratio: number, digits = 0): string {
-  if (!Number.isFinite(ratio)) return '—';
+  if (!Number.isFinite(ratio) || Math.abs(ratio) > 1e6) return '—';
   if (!Number.isInteger(digits) || digits < 0 || digits > 10) return '—';
   return `${(ratio * 100).toFixed(digits)}%`;
 }

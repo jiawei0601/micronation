@@ -42,6 +42,10 @@ export const t = {
     haveAccount: '已經有帳號?',
     goRegister: '前往開國',
     goLogin: '前往登入',
+    mailSendFailed: '驗證信寄送失敗,可點擊補寄',
+    resend: '補寄驗證信',
+    resendSuccess: '已重新寄出驗證信',
+    resendFailed: '補寄失敗,請稍後再試',
   },
   founding: {
     title: '建國之路',

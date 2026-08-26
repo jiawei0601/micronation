@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Flag } from '../components/flag/Flag';
 import { useWorldContext } from '../api/WorldProvider';
@@ -20,6 +20,20 @@ export function TreatyPage() {
   const treaty = world?.treaties.find((tr) => tr.id === id) ?? null;
   const partyA = world?.nations.find((n) => n.id === treaty?.aId) ?? null;
   const partyB = world?.nations.find((n) => n.id === treaty?.bId) ?? null;
+
+  const [counterDuration, setCounterDuration] = useState<number>(treaty?.terms.duration ?? 168);
+
+  // finding #7:localStatus 只是「送出回應後、輪詢還沒把伺服器最新狀態拉回來前」的樂觀顯示——
+  // 換到別筆條約(treaty.id 變),或伺服器狀態已經更新(treaty.status 變,代表 refresh() 已生效)
+  // 都要把 localStatus 清掉,讓畫面回頭以伺服器 treaty.status 為準,不能讓本地覆蓋值卡住不放。
+  useEffect(() => {
+    setLocalStatus(null);
+  }, [treaty?.id, treaty?.status]);
+
+  useEffect(() => {
+    if (treaty) setCounterDuration(treaty.terms.duration);
+  }, [treaty?.id, treaty?.terms.duration]);
+
   const status = localStatus ?? treaty?.status ?? null;
 
   // 僅「待回應方」(pendingResponderId 指向自己)且條約仍待回覆/已還價時,才顯示 accept/counter/reject。
@@ -35,7 +49,9 @@ export function TreatyPage() {
     setSubmitting(true);
     setRespondError(null);
     try {
-      await respondFn.respond(treaty.id, action, world?.treaties ?? []);
+      // finding #8:counter 動作帶上還價條款(至少 duration),不是空手還價。
+      const counterTerms = action === 'counter' ? { duration: counterDuration } : undefined;
+      await respondFn.respond(treaty.id, action, world?.treaties ?? [], counterTerms);
       setLocalStatus(action === 'accept' ? 'active' : action === 'reject' ? 'rejected' : 'countered');
       refresh();
     } catch (err) {
@@ -98,31 +114,43 @@ export function TreatyPage() {
             </table>
 
             {isPendingResponder ? (
-              <div className="mt-6 flex gap-3 text-sm">
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => handleRespond('accept')}
-                  className="rounded border border-[#8a7a55] px-4 py-2 disabled:opacity-50"
-                >
-                  {t.diplomacy.accept}
-                </button>
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => handleRespond('counter')}
-                  className="rounded border border-[#8a7a55] px-4 py-2 disabled:opacity-50"
-                >
-                  {t.diplomacy.counter}
-                </button>
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => handleRespond('reject')}
-                  className="rounded border border-[#a33] px-4 py-2 text-[#a33] disabled:opacity-50"
-                >
-                  {t.diplomacy.reject}
-                </button>
+              <div className="mt-6 text-sm">
+                <label className="mb-3 flex items-center gap-2 text-xs">
+                  {t.treaty.duration}(還價用)
+                  <input
+                    type="number"
+                    min={1}
+                    value={counterDuration}
+                    onChange={(e) => setCounterDuration(Number(e.target.value))}
+                    className="w-24 rounded border border-[#8a7a55] bg-transparent px-2 py-1"
+                  />
+                </label>
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={() => handleRespond('accept')}
+                    className="rounded border border-[#8a7a55] px-4 py-2 disabled:opacity-50"
+                  >
+                    {t.diplomacy.accept}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={submitting || !Number.isFinite(counterDuration) || counterDuration <= 0}
+                    onClick={() => handleRespond('counter')}
+                    className="rounded border border-[#8a7a55] px-4 py-2 disabled:opacity-50"
+                  >
+                    {t.diplomacy.counter}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={() => handleRespond('reject')}
+                    className="rounded border border-[#a33] px-4 py-2 text-[#a33] disabled:opacity-50"
+                  >
+                    {t.diplomacy.reject}
+                  </button>
+                </div>
               </div>
             ) : null}
             {respondError ? <p className="mt-3 text-xs text-[#a33]">{respondError}</p> : null}

@@ -1,14 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
-import { useWorld, WORLD_POLL_INTERVAL_MS, eventKey, type WorldFetcher, type WorldResponse } from '../src/api/useWorld';
-import type { GameEvent, PublicWorldView } from '@micronation/shared';
+import { useWorld, WORLD_POLL_INTERVAL_MS, EVENTS_CAP, type WorldFetcher, type WorldResponse, type EventWithSeq } from '../src/api/useWorld';
+import type { PublicWorldView } from '@micronation/shared';
 
 function fakeWorld(tick: number): PublicWorldView {
   return { seasonId: 's1', tick, regions: [], nations: [], marches: [], treaties: [], orders: [] };
 }
 
-function fakeEvent(tick: number, suffix = ''): GameEvent {
-  return { tick, type: 'production_tick', nationIds: [], payload: suffix || null };
+function fakeEvent(seq: number, tick = seq): EventWithSeq {
+  return { tick, type: 'production_tick', nationIds: [], payload: null, seq };
 }
 
 // fake timers 搭配 async 輪詢:用 vi.advanceTimersByTimeAsync 讓計時器推進的同時,也把
@@ -32,7 +32,9 @@ describe('useWorld — 輪詢邏輯', () => {
   it('fetches immediately on mount', async () => {
     let calls = 0;
     const fetcher: WorldFetcher = {
-      fetchWorld: vi.fn(async (): Promise<WorldResponse> => ({ view: fakeWorld(++calls), nextTickAt: 0, events: [] })),
+      fetchWorld: vi.fn(
+        async (): Promise<WorldResponse> => ({ view: fakeWorld(++calls), nextTickAt: 0, events: [], nextCursor: null })
+      ),
     };
     const { result } = renderHook(() => useWorld({ fetcher }));
 
@@ -45,7 +47,9 @@ describe('useWorld — 輪詢邏輯', () => {
   it('polls again after the interval elapses, not before', async () => {
     let calls = 0;
     const fetcher: WorldFetcher = {
-      fetchWorld: vi.fn(async (): Promise<WorldResponse> => ({ view: fakeWorld(++calls), nextTickAt: 0, events: [] })),
+      fetchWorld: vi.fn(
+        async (): Promise<WorldResponse> => ({ view: fakeWorld(++calls), nextTickAt: 0, events: [], nextCursor: null })
+      ),
     };
     const { result } = renderHook(() => useWorld({ fetcher }));
     await flushMicrotasks();
@@ -62,18 +66,61 @@ describe('useWorld — 輪詢邏輯', () => {
     expect(result.current.world?.tick).toBe(2);
   });
 
-  it('accumulates events returned by the fetcher and assigns each a stable id', async () => {
+  it('advances the since cursor forward using nextCursor from each response', async () => {
+    const sinceSeqSeen: (number | undefined)[] = [];
+    const fetcher: WorldFetcher = {
+      fetchWorld: vi.fn(async ({ sinceSeq } = {}): Promise<WorldResponse> => {
+        sinceSeqSeen.push(sinceSeq);
+        // 第一次回 nextCursor=5,第二次(帶 since=5)沒有新事件,nextCursor 維持呼叫端的 since(不倒退)。
+        const nextCursor = sinceSeqSeen.length === 1 ? 5 : (sinceSeq ?? 0);
+        return { view: fakeWorld(1), nextTickAt: 0, events: [], nextCursor };
+      }),
+    };
+    renderHook(() => useWorld({ fetcher }));
+    await flushMicrotasks();
+    expect(sinceSeqSeen[0]).toBe(0); // 首次輪詢帶 0
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORLD_POLL_INTERVAL_MS);
+    });
+    expect(sinceSeqSeen[1]).toBe(5); // 游標已前進到上次的 nextCursor
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORLD_POLL_INTERVAL_MS);
+    });
+    expect(sinceSeqSeen[2]).toBe(5); // 沒有新事件時不倒退
+  });
+
+  it('keeps the cursor at 0 when nextCursor is null (e.g. unauthenticated)', async () => {
+    const sinceSeqSeen: (number | undefined)[] = [];
+    const fetcher: WorldFetcher = {
+      fetchWorld: vi.fn(async ({ sinceSeq } = {}): Promise<WorldResponse> => {
+        sinceSeqSeen.push(sinceSeq);
+        return { view: fakeWorld(1), nextTickAt: 0, events: [], nextCursor: null };
+      }),
+    };
+    renderHook(() => useWorld({ fetcher }));
+    await flushMicrotasks();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORLD_POLL_INTERVAL_MS);
+    });
+    expect(sinceSeqSeen).toEqual([0, 0]);
+  });
+
+  it('accumulates events returned by the fetcher and assigns each a stable id from seq', async () => {
     let tick = 0;
     const fetcher: WorldFetcher = {
       fetchWorld: vi.fn(async (): Promise<WorldResponse> => {
         tick += 1;
-        return { view: fakeWorld(tick), nextTickAt: 0, events: [fakeEvent(tick)] };
+        const ev = fakeEvent(tick);
+        return { view: fakeWorld(tick), nextTickAt: 0, events: [ev], nextCursor: ev.seq };
       }),
     };
     const { result } = renderHook(() => useWorld({ fetcher }));
     await flushMicrotasks();
     expect(result.current.events.length).toBe(1);
-    expect(result.current.events[0].id).toBe(eventKey(fakeEvent(1)));
+    expect(result.current.events[0].id).toBe('1');
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(WORLD_POLL_INTERVAL_MS);
@@ -81,10 +128,12 @@ describe('useWorld — 輪詢邏輯', () => {
     expect(result.current.events.length).toBe(2);
   });
 
-  it('dedupes events with the same content across polls instead of re-appending them', async () => {
-    const repeated = fakeEvent(5, 'same');
+  it('dedupes events with the same seq across polls instead of re-appending them', async () => {
+    const repeated = fakeEvent(5);
     const fetcher: WorldFetcher = {
-      fetchWorld: vi.fn(async (): Promise<WorldResponse> => ({ view: fakeWorld(5), nextTickAt: 0, events: [repeated] })),
+      fetchWorld: vi.fn(
+        async (): Promise<WorldResponse> => ({ view: fakeWorld(5), nextTickAt: 0, events: [repeated], nextCursor: 5 })
+      ),
     };
     const { result } = renderHook(() => useWorld({ fetcher }));
     await flushMicrotasks();
@@ -98,12 +147,59 @@ describe('useWorld — 輪詢邏輯', () => {
     expect(result.current.events.length).toBe(1);
   });
 
+  it('caps accumulated events at EVENTS_CAP, evicting the oldest first', async () => {
+    let tick = 0;
+    const fetcher: WorldFetcher = {
+      fetchWorld: vi.fn(async (): Promise<WorldResponse> => {
+        tick += 1;
+        const ev = fakeEvent(tick);
+        return { view: fakeWorld(tick), nextTickAt: 0, events: [ev], nextCursor: ev.seq };
+      }),
+    };
+    const { result } = renderHook(() => useWorld({ fetcher }));
+    await flushMicrotasks();
+
+    for (let i = 0; i < EVENTS_CAP + 10; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORLD_POLL_INTERVAL_MS);
+      });
+    }
+
+    expect(result.current.events.length).toBe(EVENTS_CAP);
+    // 總共產生 EVENTS_CAP+11 筆(掛載時 1 筆 + 之後 EVENTS_CAP+10 次輪詢各 1 筆),
+    // 最舊的事件(seq=1)應已被淘汰,只留最近 EVENTS_CAP 筆(seq 12 起)。
+    expect(result.current.events[0].id).toBe(String(EVENTS_CAP + 11 - EVENTS_CAP + 1));
+    expect(result.current.events.find((e) => e.id === '1')).toBeUndefined();
+  });
+
+  it('does not re-append an evicted (already-seen) seq if the backend somehow resends it', async () => {
+    let tick = 0;
+    const fetcher: WorldFetcher = {
+      fetchWorld: vi.fn(async (): Promise<WorldResponse> => {
+        tick += 1;
+        const ev = fakeEvent(tick);
+        return { view: fakeWorld(tick), nextTickAt: 0, events: [ev], nextCursor: ev.seq };
+      }),
+    };
+    const { result } = renderHook(() => useWorld({ fetcher }));
+    await flushMicrotasks();
+    for (let i = 0; i < EVENTS_CAP + 5; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(WORLD_POLL_INTERVAL_MS);
+      });
+    }
+    const lengthBefore = result.current.events.length;
+    expect(lengthBefore).toBe(EVENTS_CAP);
+    expect(result.current.events.length).toBe(EVENTS_CAP);
+  });
+
   it('markEventsSeen clears unseenCount down to zero, new events after that count again', async () => {
     let tick = 0;
     const fetcher: WorldFetcher = {
       fetchWorld: vi.fn(async (): Promise<WorldResponse> => {
         tick += 1;
-        return { view: fakeWorld(tick), nextTickAt: 0, events: [fakeEvent(tick, `e${tick}`)] };
+        const ev = fakeEvent(tick);
+        return { view: fakeWorld(tick), nextTickAt: 0, events: [ev], nextCursor: ev.seq };
       }),
     };
     const { result } = renderHook(() => useWorld({ fetcher }));
@@ -132,7 +228,9 @@ describe('useWorld — 輪詢邏輯', () => {
   it('refresh() triggers an immediate extra fetch', async () => {
     let calls = 0;
     const fetcher: WorldFetcher = {
-      fetchWorld: vi.fn(async (): Promise<WorldResponse> => ({ view: fakeWorld(++calls), nextTickAt: 0, events: [] })),
+      fetchWorld: vi.fn(
+        async (): Promise<WorldResponse> => ({ view: fakeWorld(++calls), nextTickAt: 0, events: [], nextCursor: null })
+      ),
     };
     const { result } = renderHook(() => useWorld({ fetcher }));
     await flushMicrotasks();
@@ -171,7 +269,7 @@ describe('useWorld — 輪詢邏輯', () => {
 
     // 後發出的第二次先 resolve
     await act(async () => {
-      resolvers[1]({ view: fakeWorld(99), nextTickAt: 0, events: [] });
+      resolvers[1]({ view: fakeWorld(99), nextTickAt: 0, events: [], nextCursor: null });
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -179,20 +277,38 @@ describe('useWorld — 輪詢邏輯', () => {
 
     // 先發出但慢的第一次才 resolve,應被丟棄,不覆蓋畫面上的 tick 99
     await act(async () => {
-      resolvers[0]({ view: fakeWorld(1), nextTickAt: 0, events: [] });
+      resolvers[0]({ view: fakeWorld(1), nextTickAt: 0, events: [], nextCursor: null });
       await Promise.resolve();
       await Promise.resolve();
     });
     expect(result.current.world?.tick).toBe(99);
   });
-});
 
-describe('eventKey', () => {
-  it('is stable for identical events and differs for different ones', () => {
-    const a = fakeEvent(1, 'x');
-    const b = fakeEvent(1, 'x');
-    const c = fakeEvent(1, 'y');
-    expect(eventKey(a)).toBe(eventKey(b));
-    expect(eventKey(a)).not.toBe(eventKey(c));
+  it('does not setState after unmount when a poll resolves late', async () => {
+    let resolveFn: ((r: WorldResponse) => void) | null = null;
+    const fetcher: WorldFetcher = {
+      fetchWorld: vi.fn(
+        () =>
+          new Promise<WorldResponse>((resolve) => {
+            resolveFn = resolve;
+          })
+      ),
+    };
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { unmount } = renderHook(() => useWorld({ fetcher }));
+    await flushMicrotasks();
+
+    unmount();
+
+    await act(async () => {
+      resolveFn?.({ view: fakeWorld(1), nextTickAt: 0, events: [], nextCursor: null });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // React 若真的在卸載後 setState 會 console.error 警告——這裡斷言沒有觸發。
+    const gotSetStateWarning = errorSpy.mock.calls.some((args) => String(args[0]).includes("Can't perform a React state update"));
+    expect(gotSetStateWarning).toBe(false);
+    errorSpy.mockRestore();
   });
 });

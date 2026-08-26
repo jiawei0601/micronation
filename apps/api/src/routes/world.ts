@@ -32,11 +32,16 @@ worldRoutes.get('/', async (c) => {
   let nextCursor: number | null = null;
   if (sinceParam !== undefined && viewerId) {
     const since = Number(sinceParam);
-    if (!Number.isFinite(since)) return c.json({ error: 'INVALID_SINCE' }, 400);
-    events = await getEventsSince(c.env.DB, world.seasonId, since, viewerId);
-    // finding #24:回傳 nextCursor——有拿到事件時是最後一筆的 seq(下次帶回這個值繼續往後拿);
-    // 沒拿到新事件時維持呼叫端原本的 since,不倒退。
-    nextCursor = events.length > 0 ? events[events.length - 1].seq : since;
+    // ②-19:since 是 events 表 rowid cursor(見 getEventsSince 註解),語意上不可能是負數/小數—
+    // 原本只驗「是有限數字」,`?since=-1` 或 `?since=1.5` 會原封不動傳進 SQL 的 `rowid > ?`
+    // 比較(SQLite 對這類值有隱含轉型行為,不乾淨)。改驗證非負安全整數。
+    if (!Number.isSafeInteger(since) || since < 0) return c.json({ error: 'INVALID_SINCE' }, 400);
+    // ①-12/②-17:getEventsSince 現在回傳 { events, scannedUpTo }——scannedUpTo 是「本批掃描到
+    // 的最大 seq」,即使掃到的事件裡沒有任何一筆跟自己有關也會前進,呼叫端不會被一長串跟自己
+    // 無關的事件卡住、永遠停在同一個 since 重複輪詢同一批資料。
+    const result = await getEventsSince(c.env.DB, world.seasonId, since, viewerId);
+    events = result.events;
+    nextCursor = result.scannedUpTo;
   }
 
   return c.json({

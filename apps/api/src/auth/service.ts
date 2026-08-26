@@ -62,7 +62,10 @@ export async function register(
   try {
     await insertUser(db, row);
   } catch (e) {
-    if (isUniqueConstraintError(e)) return err('EMAIL_TAKEN');
+    // ①-5:只有撞到 idx_users_email(users.email 唯一鍵)才轉譯成 EMAIL_TAKEN——其他 unique
+    // 違規(理論上不該在 insertUser 這個單一 INSERT 發生,但保守起見不要一律吞成 EMAIL_TAKEN)
+    // 原樣往上拋,讓 index.ts onError 走 500,不要用一個語意不符的 400 錯誤蓋過去。
+    if (isUniqueConstraintErrorOn(e, 'users.email')) return err('EMAIL_TAKEN');
     throw e;
   }
 
@@ -90,9 +93,13 @@ export async function resendVerification(
   if (!user) return err('USER_NOT_FOUND');
   if (user.verified) return ok({ mailSent: false });
 
+  // ①-3:原本先把新 token 寫進 DB 再寄信——寄信若失敗(mail provider 暫時不可用),DB 裡的
+  // verify_token 已經被新 token 覆蓋掉,但使用者信箱裡最後一封能收到的其實是「上一次」的舊
+  // token(如果有的話),兩者對不上、使用者手上沒有任何一個當下有效的 token 可用。改成先產生
+  // 新 token、寄信成功之後才寫 DB——寄信失敗時舊 token(若存在且未過期)維持有效,使用者至少
+  // 還能用先前收到的信驗證,不會因為這次重寄失敗反而把原本能用的路徑弄壞。
   const verifyToken = randomHex(16);
   const verifyTokenHash = await sha256Hex(verifyToken);
-  await setVerifyToken(db, user.id, verifyTokenHash, now + VERIFY_TOKEN_TTL_MS);
 
   let mailSent = true;
   try {
@@ -100,14 +107,19 @@ export async function resendVerification(
   } catch {
     mailSent = false;
   }
+  if (mailSent) {
+    await setVerifyToken(db, user.id, verifyTokenHash, now + VERIFY_TOKEN_TTL_MS);
+  }
   return ok({ mailSent });
 }
 
 /** better-sqlite3 丟 SqliteError(code SQLITE_CONSTRAINT_UNIQUE),真正 D1 的錯誤訊息含
  * "UNIQUE constraint failed"——兩種都用訊息關鍵字判斷,不依賴特定 driver 的 error class。 */
-function isUniqueConstraintError(e: unknown): boolean {
+/** ①-5:同 db/repository.ts 的 isUniqueConstraintOn——要求訊息包含目標 `table.column` 簽章,
+ * 不是任何 unique 違規都當作同一種錯誤轉譯。 */
+function isUniqueConstraintErrorOn(e: unknown, signature: string): boolean {
   const message = e instanceof Error ? e.message : String(e);
-  return /unique/i.test(message);
+  return /unique/i.test(message) && message.includes(signature);
 }
 
 export interface LoginResult {
@@ -128,6 +140,8 @@ export async function login(db: D1Database, email: string, password: string, now
   });
   if (!valid) return err('INVALID_CREDENTIALS');
 
+  // ①-2:專案尚未部署、無任何線上 session 資料——squash migration 已把「只存雜湊」定案在唯一
+  // 的一份乾淨 schema,不存在「既有 session 明文殘留」的相容性問題。
   // finding #1/#13:session token 明文只回給 client(走 cookie),DB 只落地雜湊——即使 DB
   // 外洩,攻擊者拿到的 hash 反推不出可用的 session token。
   const sessionToken = createSessionToken();
@@ -149,7 +163,9 @@ export async function verifyEmail(db: D1Database, token: string, now: number): P
   // 全表反查的舊註解不再適用。
   const user = await findUserByToken(db, await sha256Hex(token));
   if (!user) return err('INVALID_TOKEN');
-  if (user.verify_token_expires_at === null || user.verify_token_expires_at < now) return err('TOKEN_EXPIRED');
+  // ①-4:過期判斷改用 <=,呼應 resolveSession 已有的同一原則(finding #20)——expires_at===now
+  // 這個邊界時刻視為已過期,不因為「剛好卡在那一毫秒」而放行。
+  if (user.verify_token_expires_at === null || user.verify_token_expires_at <= now) return err('TOKEN_EXPIRED');
   await markUserVerified(db, user.id);
   return ok({ userId: user.id });
 }

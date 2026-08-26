@@ -208,6 +208,8 @@ export async function applyPlaceOrder(
   if (!result.ok) return result;
 
   // ---- escrow:market 已判定合法,才真正鎖定資源 ----
+  // ②-1:專案尚未部署、無任何線上掛單資料——squash migration(0001_init.sql)已把 escrow 相關
+  // 欄位/約束定案在唯一的一份乾淨 schema 裡,不存在「既有掛單沒鎖定資源」的相容性問題。
   let escrowedNation: Nation;
   if (order.side === 'sell') {
     if (nation.resources[order.kind] < order.qty) return err('INSUFFICIENT_RESOURCES');
@@ -223,6 +225,18 @@ export async function applyPlaceOrder(
   nations = settleTrades(nations, result.value.trades);
   if (order.side === 'buy') {
     nations = refundTakerBuyOverEscrow(nations, nation.id, order.price, result.value.trades);
+  }
+
+  // ②-2:市場撮合可能一次吃進多筆對手單,結算的 `+=` 理論上可能讓資源/金錢超出
+  // Number.MAX_SAFE_INTEGER(極端情況,例如長期掛巨額單、engine 允許的價格/數量上限夠寬鬆時)。
+  // 溢位後的浮點數不再精確,後續任何「餘額比較/扣款」都可能算錯。這裡結算完成後驗證所有受
+  // 影響的欄位仍是安全整數,任一欄位溢位就整筆拒絕(不 ok,呼叫端不會 persist 這次的 state
+  // 變更,orders/trades 都不落地),不讓髒資料進 DB。
+  const touchedNationIds = new Set(result.value.trades.flatMap((t) => [t.buyerId, t.sellerId]));
+  for (const n of nations) {
+    if (!touchedNationIds.has(n.id)) continue;
+    const unsafe = (Object.values(n.resources) as number[]).some((v) => !Number.isSafeInteger(v));
+    if (unsafe) return err('RESOURCE_OVERFLOW');
   }
 
   const next = { ...state, orders: result.value.book, nations };

@@ -420,7 +420,7 @@ describe('finding #24 — /api/world 回傳 nextCursor', () => {
     const world = makeWorld({ seasonId: 'season-cursor', nations: [makeNation({ id: 'n1', ownerId: 'u1' })] });
     await createSeason(db, 'S', world, 0);
     const events = await getEventsSince(db, 'season-cursor', 0, 'n1');
-    expect(events.length).toBe(0);
+    expect(events.events.length).toBe(0);
   });
 });
 

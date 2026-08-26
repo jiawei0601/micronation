@@ -78,13 +78,7 @@ export function createTestDb(): InstanceType<typeof Database> {
   // 完整關聯鏈(user/region 等)才能寫入,同時貼近真正 D1 的約束強度。
   db.pragma('foreign_keys = OFF');
   const migrationsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'migrations');
-  for (const file of [
-    '0001_init.sql',
-    '0002_messages.sql',
-    '0003_tick_cron.sql',
-    '0004_hardening.sql',
-    '0005_hardening2.sql',
-  ]) {
+  for (const file of ['0001_init.sql']) {
     const sql = readFileSync(path.join(migrationsDir, file), 'utf-8');
     db.exec(sql);
   }

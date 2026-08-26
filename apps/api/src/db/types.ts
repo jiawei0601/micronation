@@ -39,4 +39,10 @@ export interface Env {
    * 未設定(本地/測試)一律用 ConsoleMailSender。真正呼叫 Resend REST API 的實作留 TODO
    * (需要正式帳號才能驗證串接是否正確,非本次任務範圍)。 */
   RESEND_API_KEY?: string;
+  /** ②-4:正式環境旗標(wrangler.toml [vars] 或 --env production 注入)。production 卻沒設
+   * RESEND_API_KEY 時,index.ts 的 requireMailConfig middleware 會直接 throw——Workers 沒有
+   * 「模組載入時就能讀到 env」的真正啟動鉤子(env 是每個請求各自傳入的),這是在該執行模型下
+   * 最接近「fail fast,不靜默用 ConsoleMailSender 假裝寄信成功」的做法:每個進來的請求都會先
+   * 檢查一次,設定缺漏時不會有任何請求被悄悄放行去用開發用的假寄信器。 */
+  ENVIRONMENT?: string;
 }

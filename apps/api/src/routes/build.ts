@@ -35,7 +35,7 @@ buildRoutes.post('/', requireSession, async (c) => {
   const updatedNation = findOwnNation(next, user.id)!;
 
   const now = Date.now();
-  await persistWorld(c.env.DB, state, next, [], now);
+  await persistWorld(c.env.DB, state, next, [], now, [], world.version);
   await safeCompleteTask(c.env.DB, user.id, 'build_first', now);
 
   return c.json({ nation: updatedNation });

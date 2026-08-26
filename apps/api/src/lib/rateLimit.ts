@@ -13,6 +13,24 @@ interface Bucket {
 
 const buckets = new Map<string, Bucket>();
 
+// ①-15:buckets 是一個 process 生命週期內只增不減的 Map——每個新的 key(不同 IP × action 組合)
+// 都會留下一筆記錄,即使該 IP 早已過了限流視窗、之後再也不會出現,Bucket 也不會被回收,長時間
+// 運行下記憶體隨獨立 IP 數量無上限成長(在 Cloudflare Workers isolate 有記憶體上限的環境下,
+// 這是實際的 DoS/OOM 風險面)。加兩道防線:(1) 每次呼叫時,若已超過清理間隔,順手淘汰所有已過
+// 視窗的舊 key;(2) 即使清理跟不上(大量一次性 IP 湧入),硬上限 10k key,超過時整個 Map 清空
+// 重新開始(寧可短暫誤放行,不要無界成長)。
+const MAX_BUCKETS = 10_000;
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+let lastCleanupAt = 0;
+
+function cleanupBuckets(now: number, windowMs: number): void {
+  if (now - lastCleanupAt < CLEANUP_INTERVAL_MS) return;
+  lastCleanupAt = now;
+  for (const [key, bucket] of buckets) {
+    if (now - bucket.windowStart >= windowMs) buckets.delete(key);
+  }
+}
+
 export interface RateLimitOptions {
   windowMs: number;
   max: number;
@@ -20,6 +38,10 @@ export interface RateLimitOptions {
 
 /** true = 允許放行;false = 超過限制,呼叫端應回 429。 */
 export function checkRateLimit(key: string, opts: RateLimitOptions, now: number = Date.now()): boolean {
+  cleanupBuckets(now, opts.windowMs);
+  if (buckets.size >= MAX_BUCKETS && !buckets.has(key)) {
+    buckets.clear(); // 硬上限保護——寧可短暫誤放行,不要無界成長吃光 isolate 記憶體。
+  }
   const existing = buckets.get(key);
   if (!existing || now - existing.windowStart >= opts.windowMs) {
     buckets.set(key, { count: 1, windowStart: now });
@@ -33,6 +55,7 @@ export function checkRateLimit(key: string, opts: RateLimitOptions, now: number 
 /** 測試/長跑 process 用:清空計數(避免測試之間互相污染同一個 key)。 */
 export function resetRateLimits(): void {
   buckets.clear();
+  lastCleanupAt = 0;
 }
 
 export function clientIp(header: (name: string) => string | undefined): string {

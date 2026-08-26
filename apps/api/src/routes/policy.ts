@@ -71,7 +71,7 @@ policyRoutes.post('/', requireSession, async (c) => {
   const next = { ...state, nations: state.nations.map((n) => (n.id === nation.id ? updatedNation : n)) };
 
   const now = Date.now();
-  await persistWorld(c.env.DB, state, next, [], now);
+  await persistWorld(c.env.DB, state, next, [], now, [], world.version);
   await safeCompleteTask(c.env.DB, user.id, 'set_policy', now);
 
   return c.json({ nation: updatedNation });

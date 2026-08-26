@@ -39,7 +39,7 @@ militaryRoutes.post('/attack', requireSession, async (c) => {
   };
 
   const now = Date.now();
-  await persistWorld(c.env.DB, state, next, [], now);
+  await persistWorld(c.env.DB, state, next, [], now, [], world.version);
   await safeCompleteTask(c.env.DB, user.id, 'declare_attack', now);
 
   return c.json({ march: result.value.march }, 201);
@@ -61,7 +61,7 @@ militaryRoutes.post('/recall', requireSession, async (c) => {
   if (!result.ok) return c.json({ error: result.error }, 400);
 
   const next = { ...state, marches: result.value.marches };
-  await persistWorld(c.env.DB, state, next, [], Date.now());
+  await persistWorld(c.env.DB, state, next, [], Date.now(), [], world.version);
 
   // finding #15:原本直接回傳整個 marches 陣列(含所有其他國家的行軍,精確 size 外洩)。
   // 改走 toPublicWorldView 投影——viewer 為 nation.id,只有自己涉入(attacker/defender)的
@@ -89,7 +89,7 @@ militaryRoutes.post('/train', requireSession, async (c) => {
   const next = result.value.state;
   const updatedNation = findOwnNation(next, user.id)!;
 
-  await persistWorld(c.env.DB, state, next, [], Date.now());
+  await persistWorld(c.env.DB, state, next, [], Date.now(), [], world.version);
 
   return c.json({ nation: updatedNation });
 });

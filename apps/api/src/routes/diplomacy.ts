@@ -49,7 +49,7 @@ diplomacyRoutes.post('/propose', requireSession, async (c) => {
 
   const next = { ...state, treaties: result.value.treaties };
   const now = Date.now();
-  await persistWorld(c.env.DB, state, next, result.value.events, now);
+  await persistWorld(c.env.DB, state, next, result.value.events, now, [], world.version);
   await safeCompleteTask(c.env.DB, user.id, 'propose_treaty', now);
 
   return c.json({ treaties: result.value.treaties }, 201);
@@ -76,7 +76,7 @@ diplomacyRoutes.post('/respond', requireSession, async (c) => {
 
   const next = { ...state, treaties: result.value.treaties };
   const now = Date.now();
-  await persistWorld(c.env.DB, state, next, result.value.events, now);
+  await persistWorld(c.env.DB, state, next, result.value.events, now, [], world.version);
   if (body.action === 'accept') await safeCompleteTask(c.env.DB, user.id, 'accept_treaty', now);
 
   return c.json({ treaties: result.value.treaties });
@@ -102,24 +102,30 @@ diplomacyRoutes.post('/breach', requireSession, async (c) => {
   // Nation 欄位(同 market 的「純模塊不碰 resources」原則)。這裡依 breachPenalty() 算出的
   // 賠償金額,實際從毀約方轉給對方,並把毀約方 reputation.breaches +1(公開信譽標記,
   // 呼應 CONTRACT §外交「毀約=賠償+全服背信標記」)。
+  // ②-7:原本毀約方付款端用 Math.max(0, ...) 讓自己不倒扣為負,但對方收款端仍固定收
+  // 「合約載明的 compensation」全額——毀約方餘額不夠付全額時(例如只剩 10 但 compensation 是
+  // 40),付款方只扣了 10,收款方卻憑空多了 40,等於系統無中生有印出 30 塊錢。改成先算出
+  // 「毀約方實際付得起的金額」(min(現有餘額, compensation)),付款方與收款方用同一個數字,
+  // 一分不多也不少。
   const otherPartyId = treatyBefore!.aId === nation.id ? treatyBefore!.bId : treatyBefore!.aId;
   const penalty = breachPenalty(treatyBefore!);
+  const actualCompensation = Math.max(0, Math.min(nation.resources.money, penalty.compensation));
   const nations = state.nations.map((n) => {
     if (n.id === nation.id) {
       return {
         ...n,
-        resources: { ...n.resources, money: Math.max(0, n.resources.money - penalty.compensation) },
+        resources: { ...n.resources, money: n.resources.money - actualCompensation },
         reputation: { ...n.reputation, breaches: n.reputation.breaches + 1 },
       };
     }
     if (n.id === otherPartyId) {
-      return { ...n, resources: { ...n.resources, money: n.resources.money + penalty.compensation } };
+      return { ...n, resources: { ...n.resources, money: n.resources.money + actualCompensation } };
     }
     return n;
   });
 
   const next = { ...state, treaties: result.value.treaties, nations };
-  await persistWorld(c.env.DB, state, next, result.value.events, Date.now());
+  await persistWorld(c.env.DB, state, next, result.value.events, Date.now(), [], world.version);
 
   return c.json({ treaties: result.value.treaties });
 });

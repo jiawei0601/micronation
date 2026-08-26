@@ -10,6 +10,7 @@ import type {
   PublicWorldView,
   Policies,
   Treaty,
+  TreatyTerms,
 } from '@micronation/shared';
 import { EVENT } from '@micronation/shared';
 
@@ -159,12 +160,18 @@ export function mockRankings(world: PublicWorldView): {
   };
 }
 
-/** POST /api/diplomacy/respond 的假回應——回傳更新後(本地推算)的條約清單,不落地持久化。 */
+/** POST /api/diplomacy/respond 的假回應——回傳更新後(本地推算)的條約清單,不落地持久化。
+ *  action==='counter' 時,counterTerms(例:{duration})併入 terms,模擬後端還價行為。 */
 export function mockRespondToTreaty(
   treaties: readonly Treaty[],
   treatyId: string,
-  action: 'accept' | 'reject' | 'counter'
+  action: 'accept' | 'reject' | 'counter',
+  counterTerms?: Partial<TreatyTerms>
 ): Treaty[] {
   const nextStatus = action === 'accept' ? 'active' : action === 'reject' ? 'rejected' : 'countered';
-  return treaties.map((tr) => (tr.id === treatyId ? { ...tr, status: nextStatus } : tr));
+  return treaties.map((tr) =>
+    tr.id === treatyId
+      ? { ...tr, status: nextStatus, terms: action === 'counter' && counterTerms ? { ...tr.terms, ...counterTerms } : tr.terms }
+      : tr
+  );
 }

@@ -17,7 +17,7 @@ import {
   PLAYER_INITIAL_ARMY_SIZE,
 } from '../game/constants';
 import { safeCompleteTask, insertNewNation, NationAlreadyFoundedError } from '../db/repository';
-import { parseJsonBody } from '../lib/parseBody';
+import { parseJsonBody, asTrimmedString } from '../lib/parseBody';
 
 const nationRoutes = new Hono<{ Bindings: Env }>();
 
@@ -52,7 +52,10 @@ nationRoutes.post('/', requireSession, async (c) => {
   // finding #18:這裡的記憶體檢查只是提早失敗、省一次 DB 寫入——真正的一國一владелец把關在
   // insertNewNation 的 DB 唯一索引(下方 catch NationAlreadyFoundedError)。
   if (findOwnNation(state, user.id)) return c.json({ error: 'ALREADY_HAS_NATION' }, 400);
-  if (!body.name || !isNameAllowed(body.name)) return c.json({ error: 'INVALID_NAME' }, 400);
+  // ②-3/②-8/②-18:body.name 先過 asTrimmedString(typeof 檢查+trim)——原本 `!body.name` 對
+  // truthy 的非字串值(例如數字)放行,isNameAllowed 內部呼叫 `.trim()` 會直接丟未預期例外。
+  const name = asTrimmedString(body.name, 60);
+  if (!name || !isNameAllowed(name)) return c.json({ error: 'INVALID_NAME' }, 400);
   if (!isValidFlagSpec(body.flag)) return c.json({ error: 'INVALID_FLAG' }, 400);
 
   let regionId = body.regionId;
@@ -78,7 +81,7 @@ nationRoutes.post('/', requireSession, async (c) => {
   const nation: Nation = {
     id: makeId('nation', user.id, now),
     ownerId: user.id,
-    name: body.name.trim(),
+    name,
     flag: body.flag as Nation['flag'],
     regionId,
     resources: { ...PLAYER_INITIAL_RESOURCES },

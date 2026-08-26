@@ -8,9 +8,9 @@ import { register, login, logout, verifyEmail, resendVerification } from './auth
 import { ConsoleMailSender, ResendMailSender, type MailSender } from './auth/mail';
 import { buildSessionCookie, buildClearSessionCookie, parseSessionTokenFromCookieHeader } from './auth/session';
 import { requireSession } from './middleware/requireSession';
-import { safeCompleteTask } from './db/repository';
+import { safeCompleteTask, ConflictError } from './db/repository';
 import { CorruptRowError } from './db/rows';
-import { parseJsonBody } from './lib/parseBody';
+import { parseJsonBody, asTrimmedString, asString } from './lib/parseBody';
 import { checkRateLimit, clientIp } from './lib/rateLimit';
 import { TICK_INTERVAL_MS } from './game/constants';
 import nationRoutes from './routes/nation';
@@ -37,6 +37,16 @@ function getMailSender(env: Env): MailSender {
   return env.RESEND_API_KEY ? new ResendMailSender(env.RESEND_API_KEY) : mailSender;
 }
 
+// ②-4:production 卻沒設定 RESEND_API_KEY——見 db/types.ts Env.ENVIRONMENT 註解,Workers
+// 沒有模組載入時的啟動鉤子可用,改成每個請求最前面都檢查,設定缺漏時直接 throw(由下方
+// app.onError 轉成 500),不靜默落回 ConsoleMailSender 讓正式環境的驗證信實際上沒寄出。
+app.use('*', async (c, next) => {
+  if (c.env.ENVIRONMENT === 'production' && !c.env.RESEND_API_KEY) {
+    throw new Error('CONFIG_ERROR: RESEND_API_KEY is required when ENVIRONMENT=production');
+  }
+  await next();
+});
+
 // finding #22:register/login/verify/resend 皆為未登入可打的公開端點,是暴力嘗試/濫用最常見
 // 的目標——每 IP 簡單計數,超限 429。門檻刻意設得比合理誤操作寬鬆(不希望正常使用者被誤擋),
 // 只擋明顯的自動化嘗試。
@@ -50,10 +60,15 @@ function authRateLimited(c: { req: { header(name: string): string | undefined } 
 app.post('/api/auth/register', async (c) => {
   if (authRateLimited(c, 'register')) return c.json({ error: 'RATE_LIMITED' }, 429);
   const body = await parseJsonBody<{ email?: string; password?: string }>(c.req);
-  if (!body || !body.email || !body.password) return c.json({ error: 'INVALID_BODY' }, 400);
+  // ②-3/②-8/②-18:email/password 先確認 typeof==='string' 才繼續——原本的 `!body.email` 只擋
+  // falsy 值,像 `{ email: 12345 }` 這種 truthy 的非字串值會直接流進 register(),normalizeEmail
+  // 內部呼叫 `.trim()` 對非字串丟未預期 TypeError(500,而非乾淨的 400 INVALID_BODY)。
+  const email = body ? asTrimmedString(body.email) : undefined;
+  const password = body ? asString(body.password) : undefined;
+  if (!email || !password) return c.json({ error: 'INVALID_BODY' }, 400);
 
   const now = Date.now();
-  const result = await register(c.env.DB, getMailSender(c.env), body.email, body.password, now);
+  const result = await register(c.env.DB, getMailSender(c.env), email, password, now);
   if (!result.ok) return c.json({ error: result.error }, 400);
   await safeCompleteTask(c.env.DB, result.value.userId, 'register', now);
   return c.json({ userId: result.value.userId, mailSent: result.value.mailSent }, 201);
@@ -64,20 +79,25 @@ app.post('/api/auth/register', async (c) => {
 app.post('/api/auth/resend', async (c) => {
   if (authRateLimited(c, 'resend')) return c.json({ error: 'RATE_LIMITED' }, 429);
   const body = await parseJsonBody<{ email?: string }>(c.req);
-  if (!body || !body.email) return c.json({ error: 'INVALID_BODY' }, 400);
+  const email = body ? asTrimmedString(body.email) : undefined;
+  if (!email) return c.json({ error: 'INVALID_BODY' }, 400);
 
-  const result = await resendVerification(c.env.DB, getMailSender(c.env), body.email, Date.now());
-  if (!result.ok) return c.json({ error: result.error }, 400);
-  return c.json({ mailSent: result.value.mailSent });
+  // ②-5:回應統一為 202,不因「帳號不存在/已驗證/剛重寄成功」而有可觀察差異——resendVerification
+  // 內部邏輯不變(USER_NOT_FOUND 等仍照跑),但這裡刻意不把 err 分支轉譯成不同的 HTTP 狀態碼,
+  // 避免這個公開端點被拿來當「這個 email 是否已註冊」的探測工具(user enumeration)。
+  await resendVerification(c.env.DB, getMailSender(c.env), email, Date.now());
+  return c.json({ ok: true }, 202);
 });
 
 app.post('/api/auth/login', async (c) => {
   if (authRateLimited(c, 'login')) return c.json({ error: 'RATE_LIMITED' }, 429);
   const body = await parseJsonBody<{ email?: string; password?: string }>(c.req);
-  if (!body || !body.email || !body.password) return c.json({ error: 'INVALID_BODY' }, 400);
+  const email = body ? asTrimmedString(body.email) : undefined;
+  const password = body ? asString(body.password) : undefined;
+  if (!email || !password) return c.json({ error: 'INVALID_BODY' }, 400);
 
   const now = Date.now();
-  const result = await login(c.env.DB, body.email, body.password, now);
+  const result = await login(c.env.DB, email, password, now);
   if (!result.ok) return c.json({ error: result.error }, 401);
 
   // finding #20:cookie 的 Max-Age 與 session 過期時間都用同一個 `now`,不再各自呼叫
@@ -97,10 +117,11 @@ app.post('/api/auth/logout', async (c) => {
 app.post('/api/auth/verify', async (c) => {
   if (authRateLimited(c, 'verify')) return c.json({ error: 'RATE_LIMITED' }, 429);
   const body = await parseJsonBody<{ token?: string }>(c.req);
-  if (!body || !body.token) return c.json({ error: 'INVALID_BODY' }, 400);
+  const token = body ? asTrimmedString(body.token) : undefined;
+  if (!token) return c.json({ error: 'INVALID_BODY' }, 400);
 
   const now = Date.now();
-  const result = await verifyEmail(c.env.DB, body.token, now);
+  const result = await verifyEmail(c.env.DB, token, now);
   if (!result.ok) return c.json({ error: result.error }, 400);
   await safeCompleteTask(c.env.DB, result.value.userId, 'verify_email', now);
   return c.json({ ok: true });
@@ -131,13 +152,22 @@ app.notFound((c) => c.json({ error: 'NOT_FOUND' }, 404));
 // finding #4:rows.ts 的解碼層對壞資料(手改 DB/未來 migration bug 等)丟 CorruptRowError,
 // 這裡統一攔截、記 log(附 table/rowId/field 供人工排查)、fail fast 回 500,不讓壞資料
 // 帶著看似合法的型別繼續流進業務邏輯。其餘未預期例外一律 500 INTERNAL_ERROR,不洩漏堆疊細節。
+// ②-6:回應本體一律只給 generic error + requestId,細節(table/rowId/field、完整 stack 等)
+// 只寫進 console.error——原本 CorruptRowError 分支把 table/rowId/field 直接回給呼叫端,等於把
+// 內部 schema 細節暴露給 HTTP 客戶端。requestId 讓維運端能把「使用者回報的這次請求」和 log 裡
+// 對應的詳細錯誤兜起來,不用靠時間戳硬猜。
 app.onError((err, c) => {
-  if (err instanceof CorruptRowError) {
-    console.error(`[db] corrupt row: table=${err.table} id=${err.rowId} field=${err.field}`, err);
-    return c.json({ error: 'CORRUPT_ROW', table: err.table, rowId: err.rowId, field: err.field }, 500);
+  const requestId = crypto.randomUUID();
+  if (err instanceof ConflictError) {
+    console.warn(`[conflict] ${err.message} requestId=${requestId}`);
+    return c.json({ error: 'CONFLICT', requestId, retry: true }, 409);
   }
-  console.error('[unhandled]', err);
-  return c.json({ error: 'INTERNAL_ERROR' }, 500);
+  if (err instanceof CorruptRowError) {
+    console.error(`[db] corrupt row: table=${err.table} id=${err.rowId} field=${err.field} requestId=${requestId}`, err);
+    return c.json({ error: 'INTERNAL_ERROR', requestId }, 500);
+  }
+  console.error(`[unhandled] requestId=${requestId}`, err);
+  return c.json({ error: 'INTERNAL_ERROR', requestId }, 500);
 });
 
 export { app };

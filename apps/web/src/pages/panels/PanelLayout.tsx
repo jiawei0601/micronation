@@ -1,4 +1,4 @@
-import { Link, NavLink, Outlet } from 'react-router-dom';
+import { Link, NavLink, Navigate, Outlet } from 'react-router-dom';
 import { Flag } from '../../components/flag/Flag';
 import { useWorldContext } from '../../api/WorldProvider';
 import { useNation } from '../../api/useNation';
@@ -20,10 +20,25 @@ const NAV_ITEMS: { to: string; icon: string; label: string }[] = [
 /** B 風深色數據面板殼——建設/政策/市場/軍事/外交/排行/任務共用的側欄版式。 */
 export function PanelLayout() {
   const { world, unseenCount, markEventsSeen } = useWorldContext();
-  const { nation, loading: nationLoading, hasNation } = useNation();
+  const { nation, status: nationStatus, error: nationError, refresh: refreshNation } = useNation();
 
-  // 找不到自己的國家時,不准 fallback 到 nations[0]——導向開國流程,而不是把別人的國家當自己的顯示。
-  if (!nationLoading && !hasNation) {
+  // finding #6/#12:三態分離——401 導 /login,一般錯誤顯示重試,未建國才是 CTA(不可混為一談)。
+  if (nationStatus === 'unauthenticated') {
+    return <Navigate to="/login" replace />;
+  }
+  if (nationStatus === 'error') {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-chart-panel2 text-[#e6e9ef]">
+        <div className="rounded-xl border border-[#232a38] bg-chart-panel p-8 text-center">
+          <p className="mb-4 text-sm text-[#ff8f88]">{t.common.error}: {nationError}</p>
+          <button type="button" onClick={refreshNation} className="rounded bg-chart-blue px-4 py-2 text-sm">
+            {t.common.retry}
+          </button>
+        </div>
+      </div>
+    );
+  }
+  if (nationStatus === 'no-nation') {
     return (
       <div className="flex min-h-screen items-center justify-center bg-chart-panel2 text-[#e6e9ef]">
         <div className="rounded-xl border border-[#232a38] bg-chart-panel p-8 text-center">

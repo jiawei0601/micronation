@@ -27,7 +27,21 @@ async function runBatch(db: D1Database, stmts: D1PreparedStatement[]): Promise<v
   const results = await db.batch(stmts);
   const failedIndex = results.findIndex((r) => !r.success);
   if (failedIndex !== -1) {
-    throw new Error(`D1_BATCH_FAILED: statement #${failedIndex} did not succeed`);
+    // ①-10:原本只回報「第幾筆失敗」,附上該筆的 D1Result(含 meta,可能有底層 driver 給的
+    // 錯誤碼/訊息)供人工排查,不只是一個裸字串。
+    const failed = results[failedIndex];
+    throw new Error(
+      `D1_BATCH_FAILED: statement #${failedIndex} did not succeed; meta=${JSON.stringify(failed?.meta ?? null)}`
+    );
+  }
+}
+
+/** ①-6:saveWorldState 樂觀鎖版本衝突——呼叫端讀到的 WorldState 版本已被別人(另一個玩家請求
+ * 或 tick-cron)搶先寫入,路由應回 409 並提示重試(見 index.ts app.onError)。 */
+export class ConflictError extends Error {
+  constructor(seasonId: string) {
+    super(`CONFLICT: season ${seasonId} version changed since read`);
+    this.name = 'ConflictError';
   }
 }
 
@@ -87,6 +101,16 @@ function isUniqueConstraintError(e: unknown): boolean {
   return /unique constraint/i.test(msg);
 }
 
+/** ①-5/①-10:better-sqlite3/D1 的 unique 違規錯誤訊息格式為
+ * `UNIQUE constraint failed: <table>.<col>[, <table>.<col>...]`(見 test 驗證)——只用寬鬆的
+ * /unique/i 判斷會把「任何」unique 違規都轉譯成呼叫端當下期待的那個特定錯誤(例如
+ * users.email 撞號被誤判成 seasons.status 撞號)。這裡改成要求訊息包含目標欄位的完整
+ * `table.column` 簽章,不符合就不是那個特定約束,原樣往上拋。 */
+function isUniqueConstraintOn(e: unknown, signature: string): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /unique constraint/i.test(msg) && msg.includes(signature);
+}
+
 /** 建立新賽季(初始 WorldState 全量寫入,regions 依陣列序寫入 region_index)。 */
 export async function createSeason(
   db: D1Database,
@@ -117,7 +141,10 @@ export async function createSeason(
   try {
     await runBatch(db, stmts);
   } catch (e) {
-    if (isUniqueConstraintError(e)) throw new SeasonAlreadyActiveError();
+    // ①-10:只有撞到 idx_seasons_one_active(seasons.status 唯一鍵)才轉譯成
+    // SeasonAlreadyActiveError——其他 unique 違規(例如巧合的 region/nation id 撞號)不該被
+    // 誤判成「已有 active 賽季」。
+    if (isUniqueConstraintOn(e, 'seasons.status')) throw new SeasonAlreadyActiveError();
     throw e;
   }
 }
@@ -134,13 +161,15 @@ export async function saveWorldState(
   next: WorldState,
   newEvents: GameEvent[],
   eventCreatedAt: number,
-  trades: Trade[] = []
+  trades: Trade[] = [],
+  expectedVersion?: number,
+  extraStmts: D1PreparedStatement[] = []
 ): Promise<void> {
   const stmts: D1PreparedStatement[] = [];
   // finding #3:trades 併入本次 batch,與 nations/orders/events 一起原子寫入。
   stmts.push(...tradeStmts(db, next.seasonId, trades));
 
-  // events.id 用 seasons.next_event_seq 單調遞增序號組成(見 0002 migration 註解)——
+  // events.id 用 seasons.next_event_seq 單調遞增序號組成(見 migration 註解)——
   // 同一 tick 內可能有多次 saveWorldState 呼叫(玩家操作觸發,不像 tick-cron 只跑一次),
   // 若沿用「本次呼叫內的陣列序 i」會和先前已寫入的 event id 撞主鍵。
   // finding #8:原本「SELECT 讀現值 → 之後的 batch 用讀到的值算好結果再 UPDATE」分兩步,
@@ -150,11 +179,26 @@ export async function saveWorldState(
   // 已在 sqliteD1Adapter(better-sqlite3 13.x)與正式 D1 皆可用。
   const eventSeqStart = await claimEventSeqRange(db, next.seasonId, newEvents.length);
 
-  stmts.push(
-    db
-      .prepare('UPDATE seasons SET tick = ?, next_march_seq = ? WHERE id = ?')
-      .bind(next.tick, next.nextMarchSeq, next.seasonId)
-  );
+  // ①-6:expectedVersion 有帶入時(玩家寫入路由/tick-cron 皆帶),用樂觀鎖 UPDATE 一併推進
+  // version——WHERE version = expectedVersion 若 0 rows 命中,代表讀取之後、這次寫回之前已經
+  // 有另一個請求(或 tick-cron)搶先寫入過同一個 season,呼叫端手上的 prev/next diff 是基於
+  // 過期快照算出來的,不該繼續寫——丟 ConflictError,交給 index.ts onError 統一回 409。
+  // 未帶 expectedVersion(呼叫端明確不做樂觀鎖檢查,例如舊測試直接呼叫)時退回原本行為。
+  if (expectedVersion !== undefined) {
+    const versionRow = await db
+      .prepare(
+        'UPDATE seasons SET tick = ?, next_march_seq = ?, version = version + 1 WHERE id = ? AND version = ? RETURNING id'
+      )
+      .bind(next.tick, next.nextMarchSeq, next.seasonId, expectedVersion)
+      .first<{ id: string }>();
+    if (versionRow === null) throw new ConflictError(next.seasonId);
+  } else {
+    stmts.push(
+      db
+        .prepare('UPDATE seasons SET tick = ?, next_march_seq = ?, version = version + 1 WHERE id = ?')
+        .bind(next.tick, next.nextMarchSeq, next.seasonId)
+    );
+  }
 
   diffCollection(
     prev?.nations ?? [],
@@ -198,7 +242,18 @@ export async function saveWorldState(
         )
         .bind(row.id, row.season_id, row.tick, row.type, row.nation_ids, row.payload, row.created_at)
     );
+    // ①-12/②-17:events_nations 正規化子表——getEventsSince 改走這張表查詢,不再對
+    // events.nation_ids 做 LIKE 全表掃描(也避免 id 恰為另一 id 子字串時的誤配風險)。
+    for (const nationId of e.nationIds) {
+      stmts.push(
+        db.prepare('INSERT OR IGNORE INTO events_nations (event_id, nation_id) VALUES (?, ?)').bind(row.id, nationId)
+      );
+    }
   });
+
+  // ②-15:賽季到期時,呼叫端(tick/run.ts)把 finalizeSeasonStmts(hall_of_fame + ended 標記)
+  // 併入這裡,和本次 tick 的其餘差異寫回同一個 batch 原子提交。
+  stmts.push(...extraStmts);
 
   await runBatch(db, stmts);
 }
@@ -257,7 +312,7 @@ export class NationAlreadyFoundedError extends Error {
 export async function insertNewNation(db: D1Database, seasonId: string, n: WorldState['nations'][number]): Promise<void> {
   const r = nationToRow(seasonId, n);
   try {
-    await db
+    const res = await db
       .prepare(
         `INSERT INTO nations
         (id, season_id, owner_id, name, flag, region_id, resource_food, resource_ore, resource_fuel, resource_money,
@@ -292,8 +347,13 @@ export async function insertNewNation(db: D1Database, seasonId: string, n: World
         r.last_attacked_at
       )
       .run();
+    // ①-11:D1 對單一(非 batch)statement 也可能回傳 success:false 而不拋例外(依 driver/後端
+    // 而定,同 runBatch 開頭註解的理由)——不檢查就會靜默漏寫,呼叫端(nation.ts)卻以為開國成功。
+    if (!res.success) throw new Error(`D1_INSERT_FAILED: nations id=${n.id}`);
   } catch (e) {
-    if (isUniqueConstraintError(e)) throw new NationAlreadyFoundedError();
+    // ①-5:只有撞到 idx_nations_season_owner(nations.season_id, nations.owner_id 複合唯一鍵)
+    // 才轉譯成 NationAlreadyFoundedError。
+    if (isUniqueConstraintOn(e, 'nations.season_id, nations.owner_id')) throw new NationAlreadyFoundedError();
     throw e;
   }
 }
@@ -437,6 +497,14 @@ export async function getActiveSeasonId(db: D1Database): Promise<Id | null> {
   return row?.id ?? null;
 }
 
+/** ①-6:讀取當下的樂觀鎖版本號,供 loadActiveWorld/runTick 帶著給 saveWorldState 做寫回檢查。
+ * 找不到 season 時回 0(呼叫端理論上不該對不存在的 season 寫回,回 0 只是安全預設值,不代表
+ * 「版本 0 一定合法」)。 */
+export async function getSeasonVersion(db: D1Database, seasonId: Id): Promise<number> {
+  const row = await db.prepare('SELECT version FROM seasons WHERE id = ?').bind(seasonId).first<{ version: number }>();
+  return row?.version ?? 0;
+}
+
 /**
  * finding #8:market.placeOrder 的 seq 參數來源——原本「SELECT 讀現值」+「UPDATE +1」分兩次
  * D1 呼叫,兩個並發請求可能都讀到同一個舊值、拿到同一個 seq、各自組出撞號的 order id。改用
@@ -491,8 +559,9 @@ export async function getSeasonTickRunningState(db: D1Database, seasonId: Id): P
   return { running: !!row?.tick_running, since: row?.tick_running_since ?? null };
 }
 
-/** 舊介面(單純布林)——供 game/state.ts loadActiveWorld 沿用:stale 的旗標視為「未在跑」,
- * 避免真正卡死的旗標永久擋住玩家寫入路由。 */
+/** 舊介面(單純布林)——供 game/state.ts loadActiveWorld 沿用(玩家寫入路由的 503 讀取檢查,
+ * 純粹提早失敗、非鎖的正確性來源):stale 的旗標視為「未在跑」,避免真正卡死的旗標永久擋住
+ * 玩家寫入路由。 */
 export async function getSeasonTickRunning(db: D1Database, seasonId: Id, now: number = Date.now()): Promise<boolean> {
   const { running, since } = await getSeasonTickRunningState(db, seasonId);
   if (!running) return false;
@@ -500,10 +569,46 @@ export async function getSeasonTickRunning(db: D1Database, seasonId: Id, now: nu
   return true;
 }
 
+/** ①-7/②-13:tick lease 的原子取得——單一 UPDATE ... WHERE (未在跑 OR 已 stale) 一次判斷+搶佔,
+ * 不再是「先 SELECT 讀狀態 → 再 UPDATE 寫入」兩步(兩個 runTick 幾乎同時觸發時,兩者都可能讀到
+ * 「未在跑」,都認為自己搶到鎖)。ownerId 為呼叫端(runTick)產生的隨機值,搶到鎖時寫入自己的
+ * owner——release 只清除 owner 相符的旗標,避免「A 的 stale 鎖被 B 接管後,A 遲來的 finally
+ * 又把 B 剛拿到的鎖清掉」這種 lease 被誤釋放的情況。回傳 true = 搶到鎖。 */
+export async function claimTickLease(
+  db: D1Database,
+  seasonId: Id,
+  ownerId: string,
+  now: number,
+  staleMs: number = TICK_RUNNING_STALE_MS
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `UPDATE seasons SET tick_running = 1, tick_running_since = ?, tick_owner = ?
+       WHERE id = ? AND (tick_running = 0 OR tick_running_since IS NULL OR tick_running_since < ?)
+       RETURNING id`
+    )
+    .bind(now, ownerId, seasonId, now - staleMs)
+    .first<{ id: string }>();
+  return row !== null;
+}
+
+/** release 只清除 tick_owner 與自己相符的旗標(見 claimTickLease 註解)——owner 不符代表這把鎖
+ * 早已被別人的 stale-takeover 接管,此時清空反而會誤放行接管者尚未跑完的那一輪。 */
+export async function releaseTickLease(db: D1Database, seasonId: Id, ownerId: string): Promise<void> {
+  // ①-8:tick_running_since 是 NOT NULL DEFAULT 0(squash 後的欄位定義),清除旗標時歸零而不是
+  // 寫 NULL(會違反 NOT NULL 約束)——0 與 tick_running=0 同時成立時語意就是「未在跑」。
+  await db
+    .prepare('UPDATE seasons SET tick_running = 0, tick_running_since = 0, tick_owner = NULL WHERE id = ? AND tick_owner = ?')
+    .bind(seasonId, ownerId)
+    .run();
+}
+
+/** 舊介面(單純布林寫入,非原子取得)——保留供既有測試/呼叫端(直接模擬「卡死的旗標」)沿用,
+ * 新的 runTick 本身改走 claimTickLease/releaseTickLease(見上方)。 */
 export async function setSeasonTickRunning(db: D1Database, seasonId: Id, running: boolean, now: number = Date.now()): Promise<void> {
   await db
     .prepare('UPDATE seasons SET tick_running = ?, tick_running_since = ? WHERE id = ?')
-    .bind(running ? 1 : 0, running ? now : null, seasonId)
+    .bind(running ? 1 : 0, running ? now : 0, seasonId)
     .run();
 }
 
@@ -531,6 +636,23 @@ export async function setSeasonLastTickSlot(db: D1Database, seasonId: Id, slot: 
   await db.prepare('UPDATE seasons SET last_tick_slot = ? WHERE id = ?').bind(slot, seasonId).run();
 }
 
+/** ①-9/②-14:同一時槽的「讀 last_tick_slot → 判斷 → 之後才 UPDATE」原本分兩步,兩個幾乎同時
+ * 觸發的 runTick 呼叫都可能讀到「還沒處理過這個時槽」而都跑下去。改成單一 UPDATE ... WHERE
+ * (未處理過這個時槽) RETURNING 原子地「認領」——回傳 true 才代表這次呼叫真正拿到這個時槽,
+ * 應該把它移到 runTick 最前面(取 tick lease 之前)呼叫。
+ * 取捨(②-14 註記):slot 在這裡就先認領,若後續整個 tick batch 中途失敗,這個時槽已經被標記
+ * 「處理過」、不會被下一次觸發重跑——寧可漏一個 tick(下一整點的觸發會接著跑,狀態只是慢了
+ * 一小時推進),也不要讓同一時槽因為重試而跑兩次(tick 內有非冪等的資源結算/事件寫入)。 */
+export async function claimTickSlot(db: D1Database, seasonId: Id, slot: number): Promise<boolean> {
+  const row = await db
+    .prepare(
+      'UPDATE seasons SET last_tick_slot = ? WHERE id = ? AND (last_tick_slot IS NULL OR last_tick_slot < ?) RETURNING id'
+    )
+    .bind(slot, seasonId, slot)
+    .first<{ id: string }>();
+  return row !== null;
+}
+
 export interface HallOfFameEntry {
   seasonId: Id;
   nationId: Id;
@@ -542,7 +664,7 @@ export interface HallOfFameEntry {
   category: string | null;
 }
 
-function hallOfFameStmts(db: D1Database, entries: HallOfFameEntry[], createdAt: number): D1PreparedStatement[] {
+export function hallOfFameStmts(db: D1Database, entries: HallOfFameEntry[], createdAt: number): D1PreparedStatement[] {
   return entries.map((e, i) =>
     db
       .prepare(
@@ -578,11 +700,24 @@ export async function finalizeSeason(
   entries: HallOfFameEntry[],
   endedAt: number
 ): Promise<void> {
-  const stmts: D1PreparedStatement[] = [
+  await runBatch(db, finalizeSeasonStmts(db, seasonId, entries, endedAt));
+}
+
+/** ②-15:純組裝版本(不自行呼叫 db.batch),供 saveWorldState 的 extraStmts 併入同一 batch——
+ * 「最後一 tick 的狀態落地」與「名人堂+ended 標記」原本是兩次獨立 runBatch 呼叫,若第一次成功
+ * 第二次失敗仍有 finding #27 提過的不一致窗口(只是窗口從「順序反過來」縮小成「兩次呼叫之間」)。
+ * runTick(tick/run.ts)在賽季到期時改把這裡的 stmts 一併交給 saveWorldState 的 extraStmts,
+ * 兩者在同一個 D1 batch 交易內原子提交。 */
+export function finalizeSeasonStmts(
+  db: D1Database,
+  seasonId: Id,
+  entries: HallOfFameEntry[],
+  endedAt: number
+): D1PreparedStatement[] {
+  return [
     ...hallOfFameStmts(db, entries, endedAt),
     db.prepare("UPDATE seasons SET status = 'ended', ended_at = ? WHERE id = ?").bind(endedAt, seasonId),
   ];
-  await runBatch(db, stmts);
 }
 
 // ---- trades(市場成交紀錄,供 PriceRef 近期均價計算) ----
@@ -643,20 +778,49 @@ export interface EventWithSeq extends GameEvent {
  * （world.ts 的 `since` query 參數語意隨之從「tick」改為「seq」，型別仍是 number，已在該檔
  * 加註解標示。）
  */
+export interface EventsSinceResult {
+  events: EventWithSeq[];
+  /** ①-12/②-17:本批「掃描到」的最大 seq(即使掃到的事件裡沒有任何一筆與 nationId 涉己),
+   * 呼叫端(world.ts)拿這個值當下次 since,不會因為這批剛好都是別人的事件就卡住不前進。
+   * 完全沒有新事件(scanned 為空)時等於 sinceSeq,呼叫端不倒退。 */
+  scannedUpTo: number;
+}
+
+/**
+ * `/api/world?since=` 用:season 內 nation_ids 涉及 nationId、且比上次輪詢新的事件。
+ * finding #9:用 events 表本身的 rowid(單調遞增、不重複)當 cursor。
+ * ①-12/②-17:原本用 `nation_ids LIKE '%"<id>"%'` 對 events.nation_ids 做全表 LIKE 掃描——
+ * 除了效能隨事件量成長變差,`<id>` 恰為另一個 id 的子字串時理論上也有誤配風險。改成先撈
+ * `season_id + rowid > sinceSeq` 範圍內最多 limit 筆事件(不論是否涉己),再用正規化子表
+ * events_nations(有索引)篩出哪些真的與 nationId 相關——`scannedUpTo` 用「這批掃到的最後一筆
+ * rowid」(不論是否涉己)當下次 cursor,呼叫端才不會被一連串跟自己無關的事件卡住。
+ */
 export async function getEventsSince(
   db: D1Database,
   seasonId: Id,
   sinceSeq: number,
   nationId: Id,
   limit: number = EVENTS_SINCE_LIMIT
-): Promise<EventWithSeq[]> {
-  const res = await db
-    .prepare(
-      'SELECT rowid AS seq, * FROM events WHERE season_id = ? AND rowid > ? AND nation_ids LIKE ? ORDER BY rowid ASC LIMIT ?'
-    )
-    .bind(seasonId, sinceSeq, `%"${nationId}"%`, limit)
-    .all();
-  return (res.results as { seq: number }[]).map((r) => ({ ...rowToEvent(r as never), seq: r.seq }));
+): Promise<EventsSinceResult> {
+  const scanned = await db
+    .prepare('SELECT rowid AS seq, * FROM events WHERE season_id = ? AND rowid > ? ORDER BY rowid ASC LIMIT ?')
+    .bind(seasonId, sinceSeq, limit)
+    .all<{ seq: number; id: string }>();
+  const rows = scanned.results;
+  if (rows.length === 0) return { events: [], scannedUpTo: sinceSeq };
+
+  const placeholders = rows.map(() => '?').join(', ');
+  const matched = await db
+    .prepare(`SELECT event_id FROM events_nations WHERE nation_id = ? AND event_id IN (${placeholders})`)
+    .bind(nationId, ...rows.map((r) => r.id))
+    .all<{ event_id: string }>();
+  const matchedIds = new Set(matched.results.map((r) => r.event_id));
+
+  const events = rows
+    .filter((r) => matchedIds.has(r.id))
+    .map((r) => ({ ...rowToEvent(r as never), seq: r.seq }));
+  const scannedUpTo = rows[rows.length - 1].seq;
+  return { events, scannedUpTo };
 }
 
 // ---- messages(一對一站內訊息) ----
@@ -756,6 +920,15 @@ export async function completeTask(db: D1Database, userId: string, taskKey: stri
   await db
     .prepare('INSERT OR IGNORE INTO tasks (id, user_id, task_key, completed_at, created_at) VALUES (?, ?, ?, ?, ?)')
     .bind(makeId('task', userId, taskKey), userId, taskKey, now, now)
+    .run();
+  // ①-13:目前唯一的寫入路徑(這個函式本身)一律以 completed_at=now 插入,理論上不會留下
+  // completed_at IS NULL 的殘留 row;但 schema 註解明確定義 NULL = 未完成,若未來任何其他呼叫端
+  // (或人工/其他工具)寫入了「已建立但未完成」的 row,INSERT OR IGNORE 會因為 (user_id,task_key)
+  // 已存在而永遠靜默跳過、那筆任務永遠無法被補標記完成。這裡補一道防禦:row 已存在但尚未完成時,
+  // 用 UPDATE 補上 completed_at(冪等——已完成的 row 不受影響,WHERE 已限定 completed_at IS NULL)。
+  await db
+    .prepare('UPDATE tasks SET completed_at = ? WHERE user_id = ? AND task_key = ? AND completed_at IS NULL')
+    .bind(now, userId, taskKey)
     .run();
 }
 
