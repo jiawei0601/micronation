@@ -13,11 +13,20 @@ const H = 60;
 /** spec.colors 不足或缺值時的保底色盤(避免非法 spec 讓元件崩潰)。 */
 const FALLBACK_COLORS = PALETTES.find((p) => p.id === DEFAULT_PALETTE)?.colors ?? ['#1f4e79', '#0b1d2a', '#c9a227'];
 
-/** 補滿到至少 3 色:不足時重複最後一色。非法(非陣列/空字串)一律回退保底色盤。 */
+/** 合法色碼:#rgb 或 #rrggbb(大小寫皆可)。 */
+const HEX_COLOR_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
+/**
+ * 補滿到至少 3 色:不足時重複最後一色。非白名單值(非 #rgb/#rrggbb 色碼、非陣列、空值等)
+ * 一律替換為保底色盤對應位置的預設色,不放行任意字串進 SVG fill(finding #16 白名單)。
+ */
 function sanitizeColors(colors: unknown): string[] {
-  const arr = Array.isArray(colors) ? colors.filter((c): c is string => typeof c === 'string' && c.length > 0) : [];
-  if (arr.length === 0) return [...FALLBACK_COLORS];
-  const out = [...arr];
+  const arr = Array.isArray(colors) ? colors : [];
+  const sanitized = arr.map((c, i) =>
+    typeof c === 'string' && HEX_COLOR_RE.test(c) ? c : FALLBACK_COLORS[i % FALLBACK_COLORS.length]
+  );
+  if (sanitized.length === 0) return [...FALLBACK_COLORS];
+  const out = [...sanitized];
   while (out.length < 3) out.push(out[out.length - 1]);
   return out;
 }
@@ -89,7 +98,7 @@ function fieldShapes(layoutId: string, colors: string[]): { fill: string; d?: st
 export function Flag({ spec, className, title }: FlagProps) {
   const layout = findLayout(spec?.layout ?? '');
   const colors = sanitizeColors(spec?.colors);
-  const emblemColor = colors[2] ?? colors[colors.length - 1];
+  const emblemColor = colors[colors.length - 1];
   const emblem = typeof spec?.emblem === 'string' ? findEmblem(spec.emblem) : undefined;
   const shapes = fieldShapes(layout.id, colors);
 
@@ -110,7 +119,9 @@ export function Flag({ spec, className, title }: FlagProps) {
           <path key={i} d={s.d} fill={s.fill} data-shape="field" />
         )
       )}
-      {emblem ? <path d={emblem.path()} fill={emblemColor} data-shape="emblem" /> : null}
+      {emblem ? (
+        <path d={emblem.path()} fill={emblemColor} fillRule="evenodd" data-shape="emblem" />
+      ) : null}
     </svg>
   );
 }

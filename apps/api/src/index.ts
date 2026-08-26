@@ -4,11 +4,12 @@
 
 import { Hono } from 'hono';
 import type { Env } from './db/types';
-import { register, login, logout, verifyEmail } from './auth/service';
+import { register, login, logout, verifyEmail, resendVerification } from './auth/service';
 import { ConsoleMailSender } from './auth/mail';
 import { buildSessionCookie, buildClearSessionCookie, parseSessionTokenFromCookieHeader } from './auth/session';
 import { requireSession } from './middleware/requireSession';
 import { completeTask } from './db/repository';
+import { CorruptRowError } from './db/rows';
 import nationRoutes from './routes/nation';
 import worldRoutes from './routes/world';
 import buildRoutes from './routes/build';
@@ -23,7 +24,9 @@ import adminRoutes from './routes/admin';
 import { runTick } from './tick/run';
 
 const app = new Hono<{ Bindings: Env }>();
-const mailSender = new ConsoleMailSender();
+// export:整合測試(game.test.ts/tick.test.ts)用來取得最近一次寄出的驗證信明文 token——
+// register 之後 DB 只存 SHA-256 雜湊(finding #1/#13),測試沒有真的信箱可以收信。
+export const mailSender = new ConsoleMailSender();
 
 app.post('/api/auth/register', async (c) => {
   const body = await c.req.json<{ email?: string; password?: string }>().catch(() => ({}) as never);
@@ -33,17 +36,32 @@ app.post('/api/auth/register', async (c) => {
   const result = await register(c.env.DB, mailSender, body.email, body.password, now);
   if (!result.ok) return c.json({ error: result.error }, 400);
   await completeTask(c.env.DB, result.value.userId, 'register', now);
-  return c.json({ userId: result.value.userId }, 201);
+  return c.json({ userId: result.value.userId, mailSent: result.value.mailSent }, 201);
+});
+
+// finding #16:register 寄信失敗時仍會成功建立帳號(mailSent:false)——這個端點讓使用者能
+// 重新觸發寄信。冪等:找不到帳號/已驗證都直接回應,不因重複呼叫而報錯或建立額外狀態。
+app.post('/api/auth/resend', async (c) => {
+  const body = await c.req.json<{ email?: string }>().catch(() => ({}) as never);
+  if (!body.email) return c.json({ error: 'INVALID_BODY' }, 400);
+
+  const result = await resendVerification(c.env.DB, mailSender, body.email, Date.now());
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  return c.json({ mailSent: result.value.mailSent });
 });
 
 app.post('/api/auth/login', async (c) => {
   const body = await c.req.json<{ email?: string; password?: string }>().catch(() => ({}) as never);
   if (!body.email || !body.password) return c.json({ error: 'INVALID_BODY' }, 400);
 
-  const result = await login(c.env.DB, body.email, body.password, Date.now());
+  const now = Date.now();
+  const result = await login(c.env.DB, body.email, body.password, now);
   if (!result.ok) return c.json({ error: result.error }, 401);
 
-  c.header('Set-Cookie', buildSessionCookie(result.value.sessionToken, result.value.expiresAt));
+  // finding #20:cookie 的 Max-Age 與 session 過期時間都用同一個 `now`,不再各自呼叫
+  // Date.now() 兩次(login() 內算 expiresAt 用的 now,和原本 buildSessionCookie 內部另外取的
+  // now,理論上會差請求處理耗時的幾毫秒,量級雖小但語意上就是兩個不同的「現在」)。
+  c.header('Set-Cookie', buildSessionCookie(result.value.sessionToken, result.value.expiresAt, now));
   return c.json({ userId: result.value.userId });
 });
 
@@ -82,6 +100,18 @@ app.route('/api/messages', messagesRoutes);
 app.route('/api/rankings', rankingsRoutes);
 app.route('/api/tasks', tasksRoutes);
 app.route('/api/admin', adminRoutes);
+
+// finding #4:rows.ts 的解碼層對壞資料(手改 DB/未來 migration bug 等)丟 CorruptRowError,
+// 這裡統一攔截、記 log(附 table/rowId/field 供人工排查)、fail fast 回 500,不讓壞資料
+// 帶著看似合法的型別繼續流進業務邏輯。其餘未預期例外一律 500 INTERNAL_ERROR,不洩漏堆疊細節。
+app.onError((err, c) => {
+  if (err instanceof CorruptRowError) {
+    console.error(`[db] corrupt row: table=${err.table} id=${err.rowId} field=${err.field}`, err);
+    return c.json({ error: 'CORRUPT_ROW', table: err.table, rowId: err.rowId, field: err.field }, 500);
+  }
+  console.error('[unhandled]', err);
+  return c.json({ error: 'INTERNAL_ERROR' }, 500);
+});
 
 export { app };
 

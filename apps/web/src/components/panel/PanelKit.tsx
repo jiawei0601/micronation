@@ -46,6 +46,17 @@ export function PanelRow({ left, right }: { left: ReactNode; right: ReactNode })
   );
 }
 
+/** loading / error / not-found 三態共用元件——各頁不再各自寫一段判斷字串(finding #17)。 */
+export function StatusNotice({ kind, message }: { kind: 'loading' | 'error' | 'not-found'; message: string }) {
+  const cls =
+    kind === 'error' ? 'text-[#ff8f88]' : kind === 'not-found' ? 'text-[#9aa4b5]' : 'text-[#9aa4b5] animate-pulse';
+  return (
+    <div className={`rounded-xl border border-[#232a38] bg-chart-panel p-4 text-sm ${cls}`} role={kind === 'error' ? 'alert' : 'status'}>
+      {message}
+    </div>
+  );
+}
+
 export function Tag({ children, tone = 'default' }: { children: ReactNode; tone?: 'default' | 'ok' | 'war' }) {
   const cls =
     tone === 'war'

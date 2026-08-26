@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { createTestD1 } from './support/sqliteD1Adapter';
-import { register, login, logout, verifyEmail, resolveSession } from '../src/auth/service';
+import { register, login, logout, verifyEmail, resolveSession, resendVerification } from '../src/auth/service';
 import { ConsoleMailSender } from '../src/auth/mail';
-import { hashPassword, verifyPassword, PBKDF2_ITERATIONS, normalizeEmail } from '../src/auth/password';
-import { findUserByEmail } from '../src/db/repository';
+import { hashPassword, verifyPassword, sha256Hex, PBKDF2_ITERATIONS, normalizeEmail } from '../src/auth/password';
+import { findUserByEmail, findSession } from '../src/db/repository';
 
+// finding #1/#13:DB 只存 session/verify_token 的 SHA-256 雜湊,測試沒有真的信箱可以收信,
+// 用 ConsoleMailSender 的 lastToken 取得註冊當下寄出的明文 token。
 const mail = new ConsoleMailSender();
 
 describe('auth — register → login → session → logout 全流程', () => {
@@ -66,6 +68,7 @@ describe('auth — register → login → session → logout 全流程', () => {
     const db = createTestD1();
     const now = 0;
     await register(db, mail, 'verify@example.com', 'password123', now);
+    const rawToken = mail.lastToken!;
     const row = await findUserByEmail(db, 'verify@example.com');
     expect(row?.verified).toBe(0);
     expect(row?.verify_token).toBeTruthy();
@@ -73,15 +76,87 @@ describe('auth — register → login → session → logout 全流程', () => {
     const badToken = await verifyEmail(db, 'not-the-real-token', now + 1);
     expect(badToken).toEqual({ ok: false, error: 'INVALID_TOKEN' });
 
-    const expired = await verifyEmail(db, row!.verify_token!, now + 999_999_999);
+    const expired = await verifyEmail(db, rawToken, now + 999_999_999);
     expect(expired).toEqual({ ok: false, error: 'TOKEN_EXPIRED' });
 
-    const ok = await verifyEmail(db, row!.verify_token!, now + 1);
+    const ok = await verifyEmail(db, rawToken, now + 1);
     expect(ok.ok).toBe(true);
 
     const afterVerify = await findUserByEmail(db, 'verify@example.com');
     expect(afterVerify?.verified).toBe(1);
     expect(afterVerify?.verify_token).toBeNull();
+  });
+
+  it('密碼超過 256 字元 → PASSWORD_TOO_LONG(finding #19)', async () => {
+    const db = createTestD1();
+    const result = await register(db, mail, 'toolong@example.com', 'a'.repeat(257), 0);
+    expect(result).toEqual({ ok: false, error: 'PASSWORD_TOO_LONG' });
+  });
+
+  it('寄信失敗仍註冊成功但 mailSent:false(finding #16),/api/auth/resend 可重寄且冪等', async () => {
+    const db = createTestD1();
+    const failingMail = { sendVerificationEmail: async () => { throw new Error('smtp down'); } };
+    const result = await register(db, failingMail, 'resend@example.com', 'password123', 0);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.mailSent).toBe(false);
+
+    // 帳號確實已建立(寄信失敗不擋註冊)
+    const row = await findUserByEmail(db, 'resend@example.com');
+    expect(row).not.toBeNull();
+
+    // resend 用會成功的 mail sender,兩次呼叫都要成功且不報錯(冪等)
+    const first = await resendVerification(db, mail, 'resend@example.com', 1);
+    expect(first).toEqual({ ok: true, value: { mailSent: true } });
+    const firstToken = mail.lastToken!;
+
+    const second = await resendVerification(db, mail, 'resend@example.com', 2);
+    expect(second).toEqual({ ok: true, value: { mailSent: true } });
+    const secondToken = mail.lastToken!;
+
+    // 重寄後舊 token 失效、新 token 有效(每次重寄都換發新 token)
+    expect(await verifyEmail(db, firstToken, 3)).toEqual({ ok: false, error: 'INVALID_TOKEN' });
+    expect((await verifyEmail(db, secondToken, 3)).ok).toBe(true);
+  });
+
+  it('resend 對不存在的帳號 → USER_NOT_FOUND;對已驗證帳號 → mailSent:false 不重寄', async () => {
+    const db = createTestD1();
+    const notFound = await resendVerification(db, mail, 'nobody@example.com', 0);
+    expect(notFound).toEqual({ ok: false, error: 'USER_NOT_FOUND' });
+
+    await register(db, mail, 'already@example.com', 'password123', 0);
+    const token = mail.lastToken!;
+    await verifyEmail(db, token, 1);
+
+    const result = await resendVerification(db, mail, 'already@example.com', 2);
+    expect(result).toEqual({ ok: true, value: { mailSent: false } });
+  });
+});
+
+describe('token 雜湊化(finding #1/#13)', () => {
+  it('session token 落地時存的是 SHA-256(token),不是明文', async () => {
+    const db = createTestD1();
+    await register(db, mail, 'hash-session@example.com', 'password123', 0);
+    const loginResult = await login(db, 'hash-session@example.com', 'password123', 1);
+    expect(loginResult.ok).toBe(true);
+    if (!loginResult.ok) return;
+
+    const rawToken = loginResult.value.sessionToken;
+    // 明文 token 在 DB 裡查不到(因為存的是雜湊)
+    expect(await findSession(db, rawToken)).toBeNull();
+    // 雜湊過的值查得到
+    const hashed = await sha256Hex(rawToken);
+    const session = await findSession(db, hashed);
+    expect(session).not.toBeNull();
+  });
+
+  it('users.verify_token 落地時存的是 SHA-256(token),不是明文', async () => {
+    const db = createTestD1();
+    await register(db, mail, 'hash-verify@example.com', 'password123', 0);
+    const rawToken = mail.lastToken!;
+    const row = await findUserByEmail(db, 'hash-verify@example.com');
+    expect(row?.verify_token).not.toBe(rawToken);
+    expect(row?.verify_token).toBe(await sha256Hex(rawToken));
   });
 });
 

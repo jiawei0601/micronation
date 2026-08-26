@@ -3,18 +3,27 @@ import { useNavigate } from 'react-router-dom';
 import type { FlagSpec } from '@micronation/shared';
 import { Flag } from '../../components/flag/Flag';
 import { DEFAULT_EMBLEM, DEFAULT_LAYOUT, DEFAULT_PALETTE, EMBLEMS, LAYOUTS, PALETTES } from '../../components/flag/flagOptions';
+import { useWorldContext } from '../../api/WorldProvider';
+import { foundFn } from '../../api/founding';
 import { t } from '../../i18n/zh-Hant';
 
-const REGIONS = ['北境高地', '中原平野', '東方群島', '西漠礦區', '南方沃土', '遠洋列嶼'];
+/** 國名上限——對齊 apps/api/src/game/constants.ts isNameAllowed(trim 後 1~20 字)。 */
+const NATION_NAME_MAX = 20;
 
-/** 開國流程:國名+旗幟產生器(即時預覽輸出 FlagSpec)+選區。 */
+/** 開國流程:國名+旗幟產生器(即時預覽輸出 FlagSpec)+選區。區域清單改吃 /api/world 回應裡的
+ *  regions(mock 與真 API 同介面),不再寫死;送出時帶 regionId 而非 index。 */
 export function FoundingPage() {
   const navigate = useNavigate();
+  const { world } = useWorldContext();
+  const regions = world?.regions ?? [];
+
   const [nationName, setNationName] = useState('');
   const [layoutId, setLayoutId] = useState(DEFAULT_LAYOUT);
   const [paletteId, setPaletteId] = useState(DEFAULT_PALETTE);
   const [emblemId, setEmblemId] = useState(DEFAULT_EMBLEM);
-  const [regionIndex, setRegionIndex] = useState(0);
+  const [regionId, setRegionId] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const palette = PALETTES.find((p) => p.id === paletteId) ?? PALETTES[0];
   const flagSpec: FlagSpec = useMemo(
@@ -22,10 +31,22 @@ export function FoundingPage() {
     [layoutId, palette, emblemId]
   );
 
-  function handleFound(e: React.FormEvent) {
+  const trimmedName = nationName.trim().slice(0, NATION_NAME_MAX);
+  const effectiveRegionId = regionId ?? regions[0]?.id ?? null;
+
+  async function handleFound(e: React.FormEvent) {
     e.preventDefault();
-    // API 尚未實作:開國後直接進入地圖主殼。
-    navigate('/');
+    if (!trimmedName || !effectiveRegionId || submitting) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      await foundFn.found({ name: trimmedName, flag: flagSpec, regionId: effectiveRegionId });
+      navigate('/');
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -40,8 +61,13 @@ export function FoundingPage() {
               onChange={(e) => setNationName(e.target.value)}
               placeholder={t.founding.nationNamePlaceholder}
               required
+              maxLength={NATION_NAME_MAX}
+              autoComplete="off"
               className="w-full max-w-sm rounded border border-chart-border bg-transparent px-3 py-2"
             />
+            <div className="mt-1 text-right text-xs text-[#7fa3bd]">
+              {trimmedName.length}/{NATION_NAME_MAX}
+            </div>
           </section>
 
           <section>
@@ -101,28 +127,37 @@ export function FoundingPage() {
 
           <section>
             <h2 className="mb-2 text-sm text-chart-accent">{t.founding.step3}</h2>
-            <div className="flex flex-wrap gap-2">
-              {REGIONS.map((r, i) => (
-                <button
-                  type="button"
-                  key={r}
-                  onClick={() => setRegionIndex(i)}
-                  className={`rounded border px-3 py-1.5 text-sm ${regionIndex === i ? 'border-chart-accent text-chart-accent' : 'border-chart-border'}`}
-                >
-                  {r}
-                </button>
-              ))}
-            </div>
+            {regions.length === 0 ? (
+              <p className="text-sm text-[#7fa3bd]">{t.common.loading}</p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {regions.map((r) => (
+                  <button
+                    type="button"
+                    key={r.id}
+                    onClick={() => setRegionId(r.id)}
+                    className={`rounded border px-3 py-1.5 text-sm ${effectiveRegionId === r.id ? 'border-chart-accent text-chart-accent' : 'border-chart-border'}`}
+                  >
+                    {r.name}
+                  </button>
+                ))}
+              </div>
+            )}
           </section>
 
-          <button type="submit" className="rounded bg-chart-blue px-6 py-2 text-sm">
+          <button
+            type="submit"
+            disabled={submitting || !trimmedName || !effectiveRegionId}
+            className="rounded bg-chart-blue px-6 py-2 text-sm disabled:opacity-50"
+          >
             {t.founding.found}
           </button>
+          {submitError ? <p className="text-xs text-[#ff8f88]">{submitError}</p> : null}
         </div>
 
         <aside className="sticky top-8 h-fit rounded-xl border border-chart-border bg-[rgba(13,32,46,0.82)] p-4">
-          <Flag spec={flagSpec} className="w-full rounded shadow" title={nationName || t.founding.nationNamePlaceholder} />
-          <p className="mt-3 text-center text-sm">{nationName || '—'}</p>
+          <Flag spec={flagSpec} className="w-full rounded shadow" title={trimmedName || t.founding.nationNamePlaceholder} />
+          <p className="mt-3 text-center text-sm">{trimmedName || '—'}</p>
           <pre className="mt-3 overflow-x-auto rounded bg-black/30 p-2 text-[10px] text-[#9fb8cc]">
             {JSON.stringify(flagSpec, null, 2)}
           </pre>

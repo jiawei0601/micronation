@@ -72,3 +72,41 @@ describe('Flag — 非法 spec 防護', () => {
     expect(() => render(<Flag spec={spec} />)).not.toThrow();
   });
 });
+
+describe('Flag — colors 白名單(finding #16)', () => {
+  it('replaces a non-hex color string with the fallback default at that position', () => {
+    const spec = { layout: 'solid', colors: ['javascript:alert(1)'], emblem: 'star-5' } as FlagSpec;
+    const { container } = render(<Flag spec={spec} />);
+    const field = svgOf(container).querySelector('[data-shape="field"]');
+    expect(field?.getAttribute('fill')).toMatch(/^#[0-9a-fA-F]{6}$/);
+    expect(field?.getAttribute('fill')).not.toBe('javascript:alert(1)');
+  });
+
+  it('accepts a valid 3-digit hex color', () => {
+    const spec: FlagSpec = { layout: 'solid', colors: ['#0f0'], emblem: 'star-5' };
+    const { container } = render(<Flag spec={spec} />);
+    const field = svgOf(container).querySelector('[data-shape="field"]');
+    expect(field?.getAttribute('fill')).toBe('#0f0');
+  });
+
+  it('rejects url()/expression()-style values that are not a bare hex color', () => {
+    const spec = { layout: 'solid', colors: ['url(javascript:alert(1))'], emblem: 'star-5' } as FlagSpec;
+    const { container } = render(<Flag spec={spec} />);
+    const field = svgOf(container).querySelector('[data-shape="field"]');
+    expect(field?.getAttribute('fill')).toMatch(/^#[0-9a-fA-F]{6}$/);
+  });
+
+  it('emblem uses the last sanitized color, not a fixed index', () => {
+    const spec: FlagSpec = { layout: 'solid', colors: ['#111111', '#222222'], emblem: 'star-5' };
+    const { container } = render(<Flag spec={spec} />);
+    const emblem = svgOf(container).querySelector('[data-shape="emblem"]');
+    expect(emblem?.getAttribute('fill')).toBe('#222222');
+  });
+
+  it('ring emblem path uses evenodd fill-rule so the hole renders', () => {
+    const spec: FlagSpec = { layout: 'solid', colors: ['#111111'], emblem: 'ring' };
+    const { container } = render(<Flag spec={spec} />);
+    const emblem = svgOf(container).querySelector('[data-shape="emblem"]');
+    expect(emblem?.getAttribute('fill-rule')).toBe('evenodd');
+  });
+});

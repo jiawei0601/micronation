@@ -1,9 +1,15 @@
 // 數值顯示 formatter——集中處理千分位、正負號、時間倒數,元件不得自己拼字串。
 
-/** 千分位整數顯示,非有限數一律回傳 '—'。 */
+/** 千分位整數顯示,非有限數一律回傳 '—'。超出 Number.isSafeInteger 範圍(可能為精度失真或惡意輸入)
+ *  一律截斷標記,不直接顯示可能失真的大數字。 */
 export function formatInt(n: number): string {
   if (!Number.isFinite(n)) return '—';
-  return Math.round(n).toLocaleString('zh-Hant-TW');
+  const rounded = Math.round(n);
+  if (!Number.isSafeInteger(rounded)) {
+    const clamped = rounded > 0 ? Number.MAX_SAFE_INTEGER : -Number.MAX_SAFE_INTEGER;
+    return `${clamped.toLocaleString('zh-Hant-TW')}+`;
+  }
+  return rounded.toLocaleString('zh-Hant-TW');
 }
 
 /** 帶正負號的增減量,例如 +312 / −42(全形負號避免與連字號混淆)。0 顯示 '0'。 */
@@ -15,9 +21,10 @@ export function formatDelta(n: number): string {
   return '0';
 }
 
-/** 百分比顯示,input 為 0~1 小數。 */
+/** 百分比顯示,input 為 0~1 小數。ratio 非有限數,或 digits 非 0~10 的非負整數,一律回傳 '—'。 */
 export function formatPercent(ratio: number, digits = 0): string {
   if (!Number.isFinite(ratio)) return '—';
+  if (!Number.isInteger(digits) || digits < 0 || digits > 10) return '—';
   return `${(ratio * 100).toFixed(digits)}%`;
 }
 

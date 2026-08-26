@@ -6,10 +6,13 @@ export function RegisterPage() {
   const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error] = useState<string | null>(null);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    // API 尚未實作:註冊後直接進入開國流程。
+    // 後端登入路由尚未接上(apps/api/src/auth 尚未掛 HTTP route):註冊後直接進入開國流程。
+    setSubmitting(true);
     navigate('/founding');
   }
 
@@ -22,6 +25,7 @@ export function RegisterPage() {
           <input
             type="email"
             required
+            autoComplete="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             className="mt-1 w-full rounded border border-chart-border bg-transparent px-2 py-1"
@@ -33,13 +37,15 @@ export function RegisterPage() {
             type="password"
             required
             minLength={8}
+            autoComplete="new-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             className="mt-1 w-full rounded border border-chart-border bg-transparent px-2 py-1"
           />
         </label>
-        <button type="submit" className="w-full rounded bg-chart-blue py-2 text-sm">
-          {t.auth.registerSubmit}
+        {error ? <p className="mb-3 text-xs text-[#ff8f88]">{error}</p> : null}
+        <button type="submit" disabled={submitting} className="w-full rounded bg-chart-blue py-2 text-sm disabled:opacity-50">
+          {submitting ? t.common.loading : t.auth.registerSubmit}
         </button>
         <p className="mt-3 text-center text-xs text-[#7fa3bd]">
           {t.auth.haveAccount}{' '}

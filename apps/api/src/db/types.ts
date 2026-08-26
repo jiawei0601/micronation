@@ -16,10 +16,18 @@ export interface D1PreparedStatement {
   run(): Promise<D1Result>;
 }
 
+/** 真正 D1Database.exec() 回傳 D1ExecResult({count, duration}),不是 D1Result——
+ * exec() 是給多語句、無結果集的 script 用(如 migration),語意上就不該回 results/success
+ * (finding #6)。目前 apps/api 沒有呼叫端使用這個方法(migration 走 wrangler d1 execute)。 */
+export interface D1ExecResult {
+  count: number;
+  duration: number;
+}
+
 export interface D1Database {
   prepare(query: string): D1PreparedStatement;
   batch(statements: D1PreparedStatement[]): Promise<D1Result[]>;
-  exec(query: string): Promise<D1Result>;
+  exec(query: string): Promise<D1ExecResult>;
 }
 
 /** apps/api 的 Hono Env 綁定——DB 為必要 binding,tick-cron(M8)另掛 scheduled handler。

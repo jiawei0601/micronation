@@ -3,9 +3,9 @@
 // (vitest 預設保序執行,模擬玩家連續操作的真實序列)。
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import { app } from '../src/index';
+import { app, mailSender } from '../src/index';
 import { createTestD1 } from './support/sqliteD1Adapter';
-import { createSeason, findUserByEmail } from '../src/db/repository';
+import { createSeason } from '../src/db/repository';
 import { makeWorld, makeRegion } from './support/fixtures';
 import type { D1Database } from '../src/db/types';
 
@@ -47,6 +47,11 @@ describe('M7 api 全路由整合測試', () => {
     );
   });
 
+  // finding #1/#13:DB 只存 verify_token 的雜湊,測試改從 ConsoleMailSender 攔截明文 token
+  // (見 src/index.ts 匯出的 mailSender)。逐一 register 立刻擷取,避免被下一次 register 覆蓋。
+  let verifyToken1: string;
+  let verifyToken2: string;
+
   it('01 register user1/user2', async () => {
     const r1 = await app.request('/api/auth/register', {
       method: 'POST',
@@ -54,6 +59,7 @@ describe('M7 api 全路由整合測試', () => {
       body: JSON.stringify({ email: 'p1@example.com', password: 'password123' }),
     }, env);
     expect(r1.status).toBe(201);
+    verifyToken1 = mailSender.lastToken!;
 
     const r2 = await app.request('/api/auth/register', {
       method: 'POST',
@@ -61,24 +67,24 @@ describe('M7 api 全路由整合測試', () => {
       body: JSON.stringify({ email: 'p2@example.com', password: 'password123' }),
     }, env);
     expect(r2.status).toBe(201);
+    verifyToken2 = mailSender.lastToken!;
   });
 
   it('02 verify user1/user2 email', async () => {
-    const u1 = await findUserByEmail(db, 'p1@example.com');
-    const u2 = await findUserByEmail(db, 'p2@example.com');
-    expect(u1?.verify_token).toBeTruthy();
+    expect(verifyToken1).toBeTruthy();
+    expect(verifyToken2).toBeTruthy();
 
     const v1 = await app.request('/api/auth/verify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: u1!.verify_token }),
+      body: JSON.stringify({ token: verifyToken1 }),
     }, env);
     expect(v1.status).toBe(200);
 
     const v2 = await app.request('/api/auth/verify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: u2!.verify_token }),
+      body: JSON.stringify({ token: verifyToken2 }),
     }, env);
     expect(v2.status).toBe(200);
   });

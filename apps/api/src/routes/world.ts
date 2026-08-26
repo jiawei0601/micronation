@@ -23,6 +23,10 @@ worldRoutes.get('/', async (c) => {
 
   const view = toPublicWorldView(world.state, viewerId);
 
+  // finding #9:`since` 的語意從「tick」改成 getEventsSince 回傳的 events.seq(events 表
+  // rowid,單調遞增)——見 db/repository.ts getEventsSince 註解。型別仍是 number,呼叫端
+  // (web)只需要把上次回應裡每筆事件的 `seq` 取最大值,原封不動帶回下次的 `since` 即可,不需要
+  // 自己再去湊 tick。首次輪詢帶 0(或省略 since 直接不帶 events)。
   const sinceParam = c.req.query('since');
   let events: unknown[] = [];
   if (sinceParam !== undefined && viewerId) {

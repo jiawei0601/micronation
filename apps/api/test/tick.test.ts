@@ -3,18 +3,16 @@
 
 import { describe, it, expect } from 'vitest';
 import { runTick } from '../src/tick/run';
-import { app } from '../src/index';
+import { app, mailSender } from '../src/index';
 import { createTestD1 } from './support/sqliteD1Adapter';
 import {
   createSeason,
   loadWorldState,
   getSeasonTickRunning,
   setSeasonTickRunning,
-  findUserByEmail,
 } from '../src/db/repository';
 import { makeWorld, makeRegion, makeNation, makeMarch } from './support/fixtures';
 import { SEASON_LENGTH_TICKS } from '../src/game/constants';
-import type { D1Database } from '../src/db/types';
 
 async function json<T = unknown>(res: Response): Promise<T> {
   return (await res.json()) as T;
@@ -317,10 +315,10 @@ describe('tick_running 阻擋玩家寫入(503 TICK_IN_PROGRESS)', () => {
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'a@example.com', password: 'password123' }) },
       env
     );
-    const u = await findUserByEmail(db as D1Database, 'a@example.com');
+    // finding #1/#13:DB 只存 verify_token 雜湊,改從 ConsoleMailSender 攔截明文 token。
     await app.request(
       '/api/auth/verify',
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: u!.verify_token }) },
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: mailSender.lastToken }) },
       env
     );
     const login = await app.request(

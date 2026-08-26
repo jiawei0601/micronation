@@ -11,7 +11,7 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import type { D1Database, D1PreparedStatement, D1Result } from '../../src/db/types';
+import type { D1Database, D1PreparedStatement, D1Result, D1ExecResult } from '../../src/db/types';
 
 class SqliteD1Statement implements D1PreparedStatement {
   constructor(
@@ -66,9 +66,9 @@ export class SqliteD1Adapter implements D1Database {
     return results;
   }
 
-  async exec(query: string): Promise<D1Result> {
+  async exec(query: string): Promise<D1ExecResult> {
     this.db.exec(query);
-    return { results: [], success: true };
+    return { count: 0, duration: 0 };
   }
 }
 
@@ -78,7 +78,7 @@ export function createTestDb(): InstanceType<typeof Database> {
   // 完整關聯鏈(user/region 等)才能寫入,同時貼近真正 D1 的約束強度。
   db.pragma('foreign_keys = OFF');
   const migrationsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'migrations');
-  for (const file of ['0001_init.sql', '0002_messages.sql', '0003_tick_cron.sql']) {
+  for (const file of ['0001_init.sql', '0002_messages.sql', '0003_tick_cron.sql', '0004_hardening.sql']) {
     const sql = readFileSync(path.join(migrationsDir, file), 'utf-8');
     db.exec(sql);
   }

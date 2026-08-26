@@ -5,9 +5,11 @@ import type {
   ArmySizeTier,
   FlagSpec,
   GameEvent,
+  Nation,
   PublicNation,
   PublicWorldView,
   Policies,
+  Treaty,
 } from '@micronation/shared';
 import { EVENT } from '@micronation/shared';
 
@@ -58,6 +60,32 @@ const PLAYER_NATION: PublicNation = {
 };
 
 export const MOCK_VIEWER_ID = PLAYER_NATION.id;
+
+/** GET /api/nation 的假回應——與真 Nation 同形狀(含 resources/population/morale 等私密欄位),
+ *  供 useNation 的 mock fetcher 使用,和 PLAYER_NATION(PublicNation,放進 world.nations)分開維護。 */
+export function mockOwnNation(): Nation {
+  return {
+    id: PLAYER_NATION.id,
+    ownerId: PLAYER_NATION.ownerId,
+    name: PLAYER_NATION.name,
+    flag: PLAYER_NATION.flag,
+    regionId: PLAYER_NATION.regionId,
+    resources: { food: 12480, ore: 6102, fuel: 1845, money: 28930 },
+    tech: 742,
+    actionPoints: 4,
+    population: 45210,
+    morale: 72,
+    buildings: { farm: 3, mine: 2, refinery: 1, market: 1, barracks: 5, warehouse: 3, university: 4, wall: 0 },
+    buildQueue: [],
+    army: { size: 480 },
+    policies: PLAYER_NATION.policies,
+    policyChangedAt: {},
+    reputation: PLAYER_NATION.reputation,
+    protectedUntil: 0,
+    score: PLAYER_NATION.score,
+    createdAt: 0,
+  };
+}
 
 /** 造一個含 NPC 的假 PublicWorldView。tick 讓輪詢畫面看得出時間在走。 */
 export function buildMockWorld(tick: number): PublicWorldView {
@@ -111,4 +139,32 @@ export function buildMockEvents(tick: number): GameEvent[] {
     { tick: Math.max(0, tick - 1), type: EVENT.TREATY_PROPOSED, nationIds: [PLAYER_NATION.id, 'npc-1'], payload: { kind: 'nap' } },
     { tick: Math.max(0, tick - 2), type: EVENT.BUILD_COMPLETED, nationIds: [PLAYER_NATION.id], payload: { building: 'barracks', level: 5 } },
   ];
+}
+
+/** GET /api/rankings 的假回應——與真回應同形狀(見 apps/api/src/routes/rankings.ts)。 */
+export function mockRankings(world: PublicWorldView): {
+  overall: PublicNation[];
+  economy: PublicNation[];
+  warfare: PublicNation[];
+  tech: PublicNation[];
+  diplomacy: PublicNation[];
+} {
+  const topBy = (key: keyof PublicNation['score']) => [...world.nations].sort((a, b) => b.score[key] - a.score[key]).slice(0, 20);
+  return {
+    overall: topBy('total'),
+    economy: topBy('economy'),
+    warfare: topBy('warfare'),
+    tech: topBy('tech'),
+    diplomacy: topBy('diplomacy'),
+  };
+}
+
+/** POST /api/diplomacy/respond 的假回應——回傳更新後(本地推算)的條約清單,不落地持久化。 */
+export function mockRespondToTreaty(
+  treaties: readonly Treaty[],
+  treatyId: string,
+  action: 'accept' | 'reject' | 'counter'
+): Treaty[] {
+  const nextStatus = action === 'accept' ? 'active' : action === 'reject' ? 'rejected' : 'countered';
+  return treaties.map((tr) => (tr.id === treatyId ? { ...tr, status: nextStatus } : tr));
 }

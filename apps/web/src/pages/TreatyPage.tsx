@@ -1,16 +1,49 @@
+import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Flag } from '../components/flag/Flag';
-import { useWorld } from '../api/useWorld';
+import { useWorldContext } from '../api/WorldProvider';
+import { useNation } from '../api/useNation';
+import { respondFn, type RespondAction } from '../api/diplomacy';
 import { formatTicksAsDuration } from '../lib/format';
 import { t } from '../i18n/zh-Hant';
+import type { TreatyStatus } from '@micronation/shared';
 
 /** A 風公文擬物頁——條約簽署版面。紙張底+印章+雙方國旗。 */
 export function TreatyPage() {
   const { id } = useParams<{ id: string }>();
-  const { world } = useWorld();
+  const { world, refresh } = useWorldContext();
+  const { nation } = useNation();
+  const [localStatus, setLocalStatus] = useState<TreatyStatus | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [respondError, setRespondError] = useState<string | null>(null);
+
   const treaty = world?.treaties.find((tr) => tr.id === id) ?? null;
   const partyA = world?.nations.find((n) => n.id === treaty?.aId) ?? null;
   const partyB = world?.nations.find((n) => n.id === treaty?.bId) ?? null;
+  const status = localStatus ?? treaty?.status ?? null;
+
+  // 僅「待回應方」(pendingResponderId 指向自己)且條約仍待回覆/已還價時,才顯示 accept/counter/reject。
+  // 非當事方或非輪到自己回應者一律唯讀,不顯示按鈕。
+  const isPendingResponder =
+    !!treaty &&
+    !!nation &&
+    treaty.terms.pendingResponderId === nation.id &&
+    (status === 'proposed' || status === 'countered');
+
+  async function handleRespond(action: RespondAction) {
+    if (!treaty) return;
+    setSubmitting(true);
+    setRespondError(null);
+    try {
+      await respondFn.respond(treaty.id, action, world?.treaties ?? []);
+      setLocalStatus(action === 'accept' ? 'active' : action === 'reject' ? 'rejected' : 'countered');
+      refresh();
+    } catch (err) {
+      setRespondError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
   return (
     <div className="min-h-screen bg-[#e8e2d4] px-6 py-8 font-serif text-[#2b2318]">
@@ -27,13 +60,15 @@ export function TreatyPage() {
           </div>
         </div>
 
-        {!treaty ? (
+        {!world ? (
+          <p className="mt-8 text-sm text-[#7a6c4e]">{t.common.loading}</p>
+        ) : !treaty ? (
           <p className="mt-8 text-sm text-[#7a6c4e]">找不到條約 {id}</p>
         ) : (
           <>
             <div className="mt-8 grid grid-cols-2 gap-6">
-              <PartyBlock label={t.treaty.partyA} nation={partyA} signed={treaty.status === 'active'} />
-              <PartyBlock label={t.treaty.partyB} nation={partyB} signed={treaty.status === 'active'} />
+              <PartyBlock label={t.treaty.partyA} nation={partyA} signed={status === 'active'} />
+              <PartyBlock label={t.treaty.partyB} nation={partyB} signed={status === 'active'} />
             </div>
 
             <h2 className="mt-8 border-l-4 border-[#8a7a55] pl-2 text-sm tracking-[3px]">條約條款</h2>
@@ -57,18 +92,40 @@ export function TreatyPage() {
                 ) : null}
                 <tr>
                   <td className="border border-[#cfc5a8] bg-[#eee7d3] p-2">狀態</td>
-                  <td className="border border-[#cfc5a8] p-2">{t.diplomacy.status[treaty.status]}</td>
+                  <td className="border border-[#cfc5a8] p-2">{status ? t.diplomacy.status[status] : '—'}</td>
                 </tr>
               </tbody>
             </table>
 
-            {treaty.status === 'proposed' ? (
+            {isPendingResponder ? (
               <div className="mt-6 flex gap-3 text-sm">
-                <button className="rounded border border-[#8a7a55] px-4 py-2">{t.diplomacy.accept}</button>
-                <button className="rounded border border-[#8a7a55] px-4 py-2">{t.diplomacy.counter}</button>
-                <button className="rounded border border-[#a33] px-4 py-2 text-[#a33]">{t.diplomacy.reject}</button>
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => handleRespond('accept')}
+                  className="rounded border border-[#8a7a55] px-4 py-2 disabled:opacity-50"
+                >
+                  {t.diplomacy.accept}
+                </button>
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => handleRespond('counter')}
+                  className="rounded border border-[#8a7a55] px-4 py-2 disabled:opacity-50"
+                >
+                  {t.diplomacy.counter}
+                </button>
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => handleRespond('reject')}
+                  className="rounded border border-[#a33] px-4 py-2 text-[#a33] disabled:opacity-50"
+                >
+                  {t.diplomacy.reject}
+                </button>
               </div>
             ) : null}
+            {respondError ? <p className="mt-3 text-xs text-[#a33]">{respondError}</p> : null}
           </>
         )}
 

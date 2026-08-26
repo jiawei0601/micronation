@@ -19,6 +19,18 @@ import {
   rowToEvent,
 } from './rows';
 
+/** finding #11:db.batch() 回傳每個 statement 各自的 D1Result,success:false 不會讓
+ * Promise reject——D1 的 batch 對單一 statement 失敗不保證拋例外(依 driver/後端而定),不檢查
+ * 就會靜默漏寫。統一收攏在這裡,任何一筆失敗就 throw,不吞錯繼續。 */
+async function runBatch(db: D1Database, stmts: D1PreparedStatement[]): Promise<void> {
+  if (stmts.length === 0) return;
+  const results = await db.batch(stmts);
+  const failedIndex = results.findIndex((r) => !r.success);
+  if (failedIndex !== -1) {
+    throw new Error(`D1_BATCH_FAILED: statement #${failedIndex} did not succeed`);
+  }
+}
+
 interface SeasonRow {
   id: string;
   name: string;
@@ -36,12 +48,15 @@ export async function loadWorldState(db: D1Database, seasonId: Id): Promise<Worl
     .first<SeasonRow>();
   if (!season) return null;
 
+  // finding #7:全部加 ORDER BY id——沒有明確排序時 SQLite/D1 的回傳順序不保證穩定(依實體
+  // 儲存/索引選擇而定),diffCollection 之類「比對前後兩次讀取」的邏輯、或任何依賴陣列序做
+  // 快照比較/測試斷言的呼叫端都可能因為順序抖動而誤判。
   const [regionsRes, nationsRes, marchesRes, treatiesRes, ordersRes] = await Promise.all([
     db.prepare('SELECT * FROM regions WHERE season_id = ? ORDER BY region_index ASC').bind(seasonId).all(),
-    db.prepare('SELECT * FROM nations WHERE season_id = ?').bind(seasonId).all(),
-    db.prepare('SELECT * FROM marches WHERE season_id = ?').bind(seasonId).all(),
-    db.prepare('SELECT * FROM treaties WHERE season_id = ?').bind(seasonId).all(),
-    db.prepare('SELECT * FROM market_orders WHERE season_id = ?').bind(seasonId).all(),
+    db.prepare('SELECT * FROM nations WHERE season_id = ? ORDER BY id ASC').bind(seasonId).all(),
+    db.prepare('SELECT * FROM marches WHERE season_id = ? ORDER BY id ASC').bind(seasonId).all(),
+    db.prepare('SELECT * FROM treaties WHERE season_id = ? ORDER BY id ASC').bind(seasonId).all(),
+    db.prepare('SELECT * FROM market_orders WHERE season_id = ? ORDER BY id ASC').bind(seasonId).all(),
   ]);
 
   return {
@@ -83,7 +98,7 @@ export async function createSeason(
   for (const m of state.marches) stmts.push(insertMarchStmt(db, state.seasonId, m));
   for (const t of state.treaties) stmts.push(insertTreatyStmt(db, state.seasonId, t));
   for (const o of state.orders) stmts.push(insertOrderStmt(db, state.seasonId, o));
-  await db.batch(stmts);
+  await runBatch(db, stmts);
 }
 
 /**
@@ -104,16 +119,17 @@ export async function saveWorldState(
   // events.id 用 seasons.next_event_seq 單調遞增序號組成(見 0002 migration 註解)——
   // 同一 tick 內可能有多次 saveWorldState 呼叫(玩家操作觸發,不像 tick-cron 只跑一次),
   // 若沿用「本次呼叫內的陣列序 i」會和先前已寫入的 event id 撞主鍵。
-  const eventSeqRow = await db
-    .prepare('SELECT next_event_seq FROM seasons WHERE id = ?')
-    .bind(next.seasonId)
-    .first<{ next_event_seq: number }>();
-  const eventSeqStart = eventSeqRow?.next_event_seq ?? 0;
+  // finding #8:原本「SELECT 讀現值 → 之後的 batch 用讀到的值算好結果再 UPDATE」分兩步,
+  // 兩次 saveWorldState 幾乎同時呼叫時,兩者都可能讀到同一個舊值、各自算出同一段 event seq
+  // 範圍,導致寫入的 events.id 撞主鍵(其中一筆整批 batch 失敗回滾)。改用單一
+  // `UPDATE ... RETURNING` 原子地「認領」一段 seq 範圍——SQLite 3.35+ 支援 RETURNING,
+  // 已在 sqliteD1Adapter(better-sqlite3 13.x)與正式 D1 皆可用。
+  const eventSeqStart = await claimEventSeqRange(db, next.seasonId, newEvents.length);
 
   stmts.push(
     db
-      .prepare('UPDATE seasons SET tick = ?, next_march_seq = ?, next_event_seq = ? WHERE id = ?')
-      .bind(next.tick, next.nextMarchSeq, eventSeqStart + newEvents.length, next.seasonId)
+      .prepare('UPDATE seasons SET tick = ?, next_march_seq = ? WHERE id = ?')
+      .bind(next.tick, next.nextMarchSeq, next.seasonId)
   );
 
   diffCollection(
@@ -160,7 +176,7 @@ export async function saveWorldState(
     );
   });
 
-  if (stmts.length > 0) await db.batch(stmts);
+  await runBatch(db, stmts);
 }
 
 function insertNationStmt(db: D1Database, seasonId: string, n: WorldState['nations'][number]): D1PreparedStatement {
@@ -341,25 +357,36 @@ export async function getActiveSeasonId(db: D1Database): Promise<Id | null> {
 }
 
 /**
- * market.placeOrder 的 seq 參數來源——讀取當前值、呼叫端用完後須呼叫
- * incrementSeasonOrderSeq 寫回遞增後的值。非 WorldState 欄位(shared 型別未收錄),
- * 純粹是 api 層 id 產生用的內部序號。
- * ⚠️併發限制:讀取與遞增分兩次 D1 呼叫,非原子操作;單 Worker 執行模型下多數情況已足夠
- * 安全,但同賽季同時有多個 in-flight 請求時理論上仍可能撞號,留待 M8 視流量評估是否需要
- * 原子 UPDATE...RETURNING 或樂觀鎖重試。
+ * finding #8:market.placeOrder 的 seq 參數來源——原本「SELECT 讀現值」+「UPDATE +1」分兩次
+ * D1 呼叫,兩個並發請求可能都讀到同一個舊值、拿到同一個 seq、各自組出撞號的 order id。改用
+ * 單一 `UPDATE ... RETURNING` 原子地「認領並遞增」,不留讀-改-寫之間的競態窗口。
+ * 找不到該 season(seasonId 打錯/season 已被刪除)時丟例外,不要靜默回 0 讓呼叫端拿到假序號。
  */
-export async function getSeasonOrderSeq(db: D1Database, seasonId: Id): Promise<number> {
-  const row = await db.prepare('SELECT next_order_seq FROM seasons WHERE id = ?').bind(seasonId).first<{
-    next_order_seq: number;
-  }>();
-  return row?.next_order_seq ?? 0;
+export async function claimNextOrderSeq(db: D1Database, seasonId: Id): Promise<number> {
+  const row = await db
+    .prepare('UPDATE seasons SET next_order_seq = next_order_seq + 1 WHERE id = ? RETURNING next_order_seq - 1 AS seq')
+    .bind(seasonId)
+    .first<{ seq: number }>();
+  if (row === null) throw new Error(`SEASON_NOT_FOUND: ${seasonId}`);
+  return row.seq;
 }
 
-export async function incrementSeasonOrderSeq(db: D1Database, seasonId: Id): Promise<void> {
-  await db
-    .prepare('UPDATE seasons SET next_order_seq = next_order_seq + 1 WHERE id = ?')
-    .bind(seasonId)
-    .run();
+/** 同 claimNextOrderSeq 的原子手法,一次認領 [start, start+count) 這段 events seq 範圍。
+ * count === 0 時單純讀現值,不觸發寫入(saveWorldState 沒有新事件時的常見情況)。 */
+async function claimEventSeqRange(db: D1Database, seasonId: Id, count: number): Promise<number> {
+  if (count <= 0) {
+    const row = await db
+      .prepare('SELECT next_event_seq FROM seasons WHERE id = ?')
+      .bind(seasonId)
+      .first<{ next_event_seq: number }>();
+    return row?.next_event_seq ?? 0;
+  }
+  const row = await db
+    .prepare('UPDATE seasons SET next_event_seq = next_event_seq + ? WHERE id = ? RETURNING next_event_seq - ? AS seq')
+    .bind(count, seasonId, count)
+    .first<{ seq: number }>();
+  if (row === null) throw new Error(`SEASON_NOT_FOUND: ${seasonId}`);
+  return row.seq;
 }
 
 // ---- tick-cron 競態緩解旗標(M8) ----
@@ -419,7 +446,7 @@ export async function insertHallOfFameEntries(db: D1Database, entries: HallOfFam
         createdAt
       )
   );
-  await db.batch(stmts);
+  await runBatch(db, stmts);
 }
 
 // ---- trades(市場成交紀錄,供 PriceRef 近期均價計算) ----
@@ -435,7 +462,7 @@ export async function insertTrades(db: D1Database, seasonId: Id, trades: Trade[]
       )
       .bind(t.id, seasonId, t.buyOrderId, t.sellOrderId, t.buyerId, t.sellerId, t.kind, t.qty, t.price, t.tariff, t.tick)
   );
-  await db.batch(stmts);
+  await runBatch(db, stmts);
 }
 
 const RESOURCE_KINDS: ResourceKind[] = ['food', 'ore', 'fuel', 'money'];
@@ -463,18 +490,38 @@ export async function getRecentAvgPrices(
 
 // ---- events(涉己事件輪詢) ----
 
-/** `/api/world?since=` 用:season 內 tick > sinceTick 且 nation_ids 涉及 nationId 的事件。 */
+export const EVENTS_SINCE_LIMIT = 200; // finding #12
+
+export interface EventWithSeq extends GameEvent {
+  /** events 表的 SQLite rowid——單調遞增,供下一次輪詢的 `since` cursor 使用(finding #9)。 */
+  seq: number;
+}
+
+/**
+ * `/api/world?since=` 用:season 內 nation_ids 涉及 nationId、且比上次輪詢新的事件。
+ * finding #9:原本用「tick > sinceTick」判斷,但同一個 tick 內常有多次 saveWorldState 呼叫
+ * (玩家操作觸發,見 saveWorldState 開頭註解),也就是同一 tick 可能分好幾批寫入 events。
+ * 客戶端若把「目前看到的最大 tick」當作下次的 since,同一 tick 內較晚才寫入、但還沒輪詢過的
+ * 事件會被 `tick > sinceTick`(嚴格大於)永久漏掉——它們的 tick 不大於 sinceTick,但當時
+ * 還沒寫入,上一次輪詢也沒拿到。改用 events 表本身的 rowid(單調遞增、不重複,不受同一 tick
+ * 內多筆這種語意影響)當 cursor,呼叫端把上次拿到的最大 seq 帶回來即可,不會漏、也不會重複。
+ * （world.ts 的 `since` query 參數語意隨之從「tick」改為「seq」，型別仍是 number，已在該檔
+ * 加註解標示。）
+ */
 export async function getEventsSince(
   db: D1Database,
   seasonId: Id,
-  sinceTick: number,
-  nationId: Id
-): Promise<GameEvent[]> {
+  sinceSeq: number,
+  nationId: Id,
+  limit: number = EVENTS_SINCE_LIMIT
+): Promise<EventWithSeq[]> {
   const res = await db
-    .prepare('SELECT * FROM events WHERE season_id = ? AND tick > ? AND nation_ids LIKE ? ORDER BY tick ASC')
-    .bind(seasonId, sinceTick, `%"${nationId}"%`)
+    .prepare(
+      'SELECT rowid AS seq, * FROM events WHERE season_id = ? AND rowid > ? AND nation_ids LIKE ? ORDER BY rowid ASC LIMIT ?'
+    )
+    .bind(seasonId, sinceSeq, `%"${nationId}"%`, limit)
     .all();
-  return (res.results as never[]).map((r) => rowToEvent(r as never));
+  return (res.results as { seq: number }[]).map((r) => ({ ...rowToEvent(r as never), seq: r.seq }));
 }
 
 // ---- messages(一對一站內訊息) ----
@@ -498,15 +545,18 @@ export async function insertMessage(db: D1Database, row: MessageRow): Promise<vo
     .run();
 }
 
+export const MESSAGES_LIST_LIMIT = 100; // finding #12
+
 export async function listMessagesForNation(
   db: D1Database,
   nationId: Id,
-  box: 'inbox' | 'sent'
+  box: 'inbox' | 'sent',
+  limit: number = MESSAGES_LIST_LIMIT
 ): Promise<MessageRow[]> {
   const column = box === 'inbox' ? 'to_nation_id' : 'from_nation_id';
   const res = await db
-    .prepare(`SELECT * FROM messages WHERE ${column} = ? ORDER BY created_at DESC`)
-    .bind(nationId)
+    .prepare(`SELECT * FROM messages WHERE ${column} = ? ORDER BY created_at DESC LIMIT ?`)
+    .bind(nationId, limit)
     .all<MessageRow>();
   return res.results;
 }
@@ -526,23 +576,16 @@ export async function getUserTaskRows(db: D1Database, userId: string): Promise<T
   return res.results;
 }
 
-/** 標記任務完成——已完成則略過(冪等),對應 idx_tasks_user_key 唯一鍵。 */
+/**
+ * 標記任務完成——冪等,對應 idx_tasks_user_key 唯一鍵。
+ * finding #10:原本「SELECT 現況 → 依結果決定 UPDATE 或 INSERT」分兩步,兩個並發請求(同一
+ * user 同一 task_key 幾乎同時觸發,例如重複點兩下)可能都讀到「不存在」,兩者都嘗試 INSERT,
+ * 其中一個撞 idx_tasks_user_key 唯一鍵而丟未預期的例外。改用 INSERT OR IGNORE——已存在就
+ * 什麼都不做(第一次完成的時間點為準,不覆寫),單一 SQL 語句沒有讀-改-寫之間的競態窗口。
+ */
 export async function completeTask(db: D1Database, userId: string, taskKey: string, now: number): Promise<void> {
-  const existing = await db
-    .prepare('SELECT completed_at FROM tasks WHERE user_id = ? AND task_key = ?')
-    .bind(userId, taskKey)
-    .first<{ completed_at: number | null }>();
-  if (existing) {
-    if (existing.completed_at === null) {
-      await db
-        .prepare('UPDATE tasks SET completed_at = ? WHERE user_id = ? AND task_key = ?')
-        .bind(now, userId, taskKey)
-        .run();
-    }
-    return;
-  }
   await db
-    .prepare('INSERT INTO tasks (id, user_id, task_key, completed_at, created_at) VALUES (?, ?, ?, ?, ?)')
+    .prepare('INSERT OR IGNORE INTO tasks (id, user_id, task_key, completed_at, created_at) VALUES (?, ?, ?, ?, ?)')
     .bind(makeId('task', userId, taskKey), userId, taskKey, now, now)
     .run();
 }

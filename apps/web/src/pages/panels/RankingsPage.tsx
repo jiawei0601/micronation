@@ -1,19 +1,21 @@
-import { Card, PanelRow } from '../../components/panel/PanelKit';
+import { Card, PanelRow, StatusNotice } from '../../components/panel/PanelKit';
 import { t } from '../../i18n/zh-Hant';
-import { usePanelContext } from './context';
+import { useRankings } from '../../api/useRankings';
 
 export function RankingsPage() {
-  const { world } = usePanelContext();
-  const ranked = [...(world?.nations ?? [])].sort((a, b) => b.score.total - a.score.total);
+  const { rankings, loading, error } = useRankings();
+  const ranked = rankings.overall;
 
   return (
     <div>
       <h1 className="mb-4 text-lg">{t.nav.rankings}</h1>
       <Card title={t.rankings.overall}>
+        {error ? <StatusNotice kind="error" message={error} /> : null}
+        {!error && loading ? <StatusNotice kind="loading" message={t.common.loading} /> : null}
+        {!error && !loading && ranked.length === 0 ? <StatusNotice kind="not-found" message="尚無排行資料" /> : null}
         {ranked.map((n, i) => (
           <PanelRow key={n.id} left={`#${i + 1} ${n.name}`} right={n.score.total} />
         ))}
-        {ranked.length === 0 ? <p className="text-sm text-[#9aa4b5]">{t.common.loading}</p> : null}
       </Card>
     </div>
   );

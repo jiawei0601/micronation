@@ -12,9 +12,12 @@ export function sessionExpiryFrom(nowMs: number): number {
   return nowMs + SESSION_DURATION_MS;
 }
 
-/** Set-Cookie header 值——HttpOnly + Secure + SameSite=Lax,期限 30 天。 */
-export function buildSessionCookie(token: string, expiresAtMs: number): string {
-  const maxAgeSec = Math.max(0, Math.floor((expiresAtMs - Date.now()) / 1000));
+/** Set-Cookie header 值——HttpOnly + Secure + SameSite=Lax,期限 30 天。
+ * finding #20:maxAgeSec 須用「建立 session 時的同一個 now」計算,不可另外呼叫 Date.now()
+ * ——否則 expiresAtMs(=now+SESSION_DURATION_MS)與這裡重新取的 now 之間有請求處理耗時的落差,
+ * 兩處對「現在」的認知不一致。 */
+export function buildSessionCookie(token: string, expiresAtMs: number, now: number): string {
+  const maxAgeSec = Math.max(0, Math.floor((expiresAtMs - now) / 1000));
   return [
     `${SESSION_COOKIE_NAME}=${token}`,
     'Path=/',
@@ -30,6 +33,8 @@ export function buildClearSessionCookie(): string {
   return [`${SESSION_COOKIE_NAME}=`, 'Path=/', 'HttpOnly', 'Secure', 'SameSite=Lax', 'Max-Age=0'].join('; ');
 }
 
+/** finding #14:decodeURIComponent 對格式不良的 %escape 會丟例外;cookie 是不可信輸入,
+ * 壞值視同「沒帶 cookie」(未登入),不可讓整個 middleware/route 500。 */
 export function parseSessionTokenFromCookieHeader(cookieHeader: string | null | undefined): string | null {
   if (!cookieHeader) return null;
   const parts = cookieHeader.split(';').map((p) => p.trim());
@@ -37,7 +42,13 @@ export function parseSessionTokenFromCookieHeader(cookieHeader: string | null | 
     const eq = part.indexOf('=');
     if (eq === -1) continue;
     const name = part.slice(0, eq);
-    if (name === SESSION_COOKIE_NAME) return decodeURIComponent(part.slice(eq + 1));
+    if (name === SESSION_COOKIE_NAME) {
+      try {
+        return decodeURIComponent(part.slice(eq + 1));
+      } catch {
+        return null;
+      }
+    }
   }
   return null;
 }

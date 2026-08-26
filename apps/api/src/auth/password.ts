@@ -1,7 +1,7 @@
 // PBKDF2-SHA256 密碼雜湊,經 WebCrypto(Workers 與 Node 18+ 皆內建 globalThis.crypto.subtle)。
 // 不用第三方雜湊庫,避免 Workers 環境相容性問題。
 
-export const PBKDF2_ITERATIONS = 120_000; // >= 100k(規格下限),留餘裕
+export const PBKDF2_ITERATIONS = 600_000; // OWASP 現行建議(2023+ PBKDF2-SHA256 下限)
 const HASH_BITS = 256;
 const SALT_BYTES = 16;
 
@@ -64,4 +64,11 @@ function timingSafeEqual(a: string, b: string): boolean {
 
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
+}
+
+/** SHA-256 hex digest,經 WebCrypto——用於 session token / verify_token 落地前雜湊,
+ * 避免 DB 洩漏(讀權限外洩/備份外流)時攻擊者能直接冒用明文 token(finding #1/#13)。 */
+export async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  return toHex(digest);
 }

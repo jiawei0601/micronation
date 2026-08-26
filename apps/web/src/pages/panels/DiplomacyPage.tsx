@@ -4,14 +4,15 @@ import { t } from '../../i18n/zh-Hant';
 import { usePanelContext } from './context';
 
 export function DiplomacyPage() {
-  const { world } = usePanelContext();
-  const treaties = world?.treaties ?? [];
+  const { world, nation } = usePanelContext();
+  // 只列自己涉入的條約(aId/bId 其一是自己),不是全世界的條約清單。
+  const treaties = (world?.treaties ?? []).filter((tr) => nation && (tr.aId === nation.id || tr.bId === nation.id));
 
   return (
     <div>
       <h1 className="mb-4 text-lg">{t.nav.diplomacy}</h1>
       <Card title={t.diplomacy.reputation}>
-        <PanelRow left={t.diplomacy.breaches} right="0" />
+        <PanelRow left={t.diplomacy.breaches} right={nation?.reputation.breaches ?? '—'} />
       </Card>
       <div className="mt-3">
         <Card title="條約清單">

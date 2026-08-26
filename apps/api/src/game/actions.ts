@@ -20,7 +20,7 @@ import { placeOrder } from '@micronation/market';
 import { tradeDiscount } from '@micronation/diplomacy';
 import type { D1Database } from '../db/types';
 import { BASE_TARIFF_RATE, MARKET_PRICE_LOOKBACK } from './constants';
-import { getRecentAvgPrices, getSeasonOrderSeq, incrementSeasonOrderSeq, insertTrades } from '../db/repository';
+import { getRecentAvgPrices, claimNextOrderSeq, insertTrades } from '../db/repository';
 
 function replaceNation(state: WorldState, nation: Nation): WorldState {
   return { ...state, nations: state.nations.map((n) => (n.id === nation.id ? nation : n)) };
@@ -111,7 +111,11 @@ export async function applyPlaceOrder(
   const tariffRate = computeTariffRate(nation, counterpart, state.treaties);
 
   const avgPrice = await getRecentAvgPrices(db, seasonId, MARKET_PRICE_LOOKBACK);
-  const seq = await getSeasonOrderSeq(db, seasonId);
+  // finding #8:seq 改由 claimNextOrderSeq 一次原子認領(UPDATE...RETURNING),取代舊的
+  // 「先讀現值、驗證通過後才另外遞增」兩步式——後者在驗證失敗時不會遞增,seq 沒有真的被消耗,
+  // 但也代表兩個並發請求可能讀到同一個值。新版每次呼叫必定拿到獨一無二的 seq(即使該筆單
+  // 之後驗證失敗、这個 seq 就作廢不用,換來的是「已認領的 seq 一定不重複」這個較強的保證。
+  const seq = await claimNextOrderSeq(db, seasonId);
 
   const result = placeOrder(
     state.orders,
@@ -123,7 +127,6 @@ export async function applyPlaceOrder(
   );
   if (!result.ok) return result;
 
-  await incrementSeasonOrderSeq(db, seasonId);
   if (result.value.trades.length > 0) await insertTrades(db, seasonId, result.value.trades);
 
   const next = { ...state, orders: result.value.book };

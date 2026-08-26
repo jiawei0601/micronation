@@ -1,14 +1,77 @@
 // D1 <-> shared 型別的 row 轉換。複雜欄位(flag/buildings/build_queue/policies/
 // policy_changed_at/score/terms/bonuses/nation_ids/payload)一律 JSON.stringify/parse。
+//
+// finding #4:JSON.parse 對壞資料(手改 DB/未來 migration bug/其他 process 寫壞)會丟未分類的
+// SyntaxError,呼叫端(repository → routes)拿到的錯誤看不出是哪張表哪一筆壞掉。這裡統一包
+// try/catch 成 CorruptRowError(附 table/rowId/field),並對已知只允許固定字面值的欄位
+// (treaty.kind/status、order.kind/side、event.type)加白名單驗證——不合法值不是「解析失敗」
+// 而是「解析成功但語意不對」,一樣視為壞資料 fail fast,不讓後續業務邏輯拿一個型別上宣稱
+// 合法、實際是垃圾字串的值繼續跑。
 
 import type {
   Nation,
   Region,
   March,
   Treaty,
+  TreatyKind,
+  TreatyStatus,
   MarketOrder,
+  ResourceKind,
+  OrderSide,
   GameEvent,
 } from '@micronation/shared';
+import { EVENT, type EventType } from '@micronation/shared';
+
+/** rows.ts 專用錯誤——repository/routes 層對它 fail fast(500 附 table/rowId/field),
+ * 不當一般 SyntaxError 吞掉繼續跑。 */
+export class CorruptRowError extends Error {
+  readonly table: string;
+  readonly rowId: string;
+  readonly field: string;
+
+  constructor(table: string, rowId: string, field: string, cause?: unknown) {
+    super(`CORRUPT_ROW: ${table}(id=${rowId}).${field} 解析失敗或不合法`);
+    this.name = 'CorruptRowError';
+    this.table = table;
+    this.rowId = rowId;
+    this.field = field;
+    if (cause !== undefined) (this as { cause?: unknown }).cause = cause;
+  }
+}
+
+function parseJson<T>(table: string, rowId: string, field: string, raw: string): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch (e) {
+    throw new CorruptRowError(table, rowId, field, e);
+  }
+}
+
+function assertEnum<T extends string>(
+  table: string,
+  rowId: string,
+  field: string,
+  value: string,
+  allowed: readonly T[]
+): T {
+  if (!(allowed as readonly string[]).includes(value)) {
+    throw new CorruptRowError(table, rowId, field);
+  }
+  return value as T;
+}
+
+const TREATY_KINDS: readonly TreatyKind[] = ['nap', 'alliance', 'trade'];
+const TREATY_STATUSES: readonly TreatyStatus[] = [
+  'proposed',
+  'countered',
+  'active',
+  'expired',
+  'breached',
+  'rejected',
+];
+const RESOURCE_KINDS: readonly ResourceKind[] = ['food', 'ore', 'fuel', 'money'];
+const ORDER_SIDES: readonly OrderSide[] = ['buy', 'sell'];
+const EVENT_TYPES: readonly EventType[] = Object.values(EVENT);
 
 export interface NationRow {
   id: string;
@@ -71,7 +134,7 @@ export function rowToNation(r: NationRow): Nation {
     id: r.id,
     ownerId: r.owner_id,
     name: r.name,
-    flag: JSON.parse(r.flag),
+    flag: parseJson('nations', r.id, 'flag', r.flag),
     regionId: r.region_id,
     resources: {
       food: r.resource_food,
@@ -83,14 +146,14 @@ export function rowToNation(r: NationRow): Nation {
     actionPoints: r.action_points,
     population: r.population,
     morale: r.morale,
-    buildings: JSON.parse(r.buildings),
-    buildQueue: JSON.parse(r.build_queue),
+    buildings: parseJson('nations', r.id, 'buildings', r.buildings),
+    buildQueue: parseJson('nations', r.id, 'build_queue', r.build_queue),
     army: { size: r.army_size },
-    policies: JSON.parse(r.policies),
-    policyChangedAt: JSON.parse(r.policy_changed_at),
+    policies: parseJson('nations', r.id, 'policies', r.policies),
+    policyChangedAt: parseJson('nations', r.id, 'policy_changed_at', r.policy_changed_at),
     reputation: { breaches: r.reputation_breaches },
     protectedUntil: r.protected_until,
-    score: JSON.parse(r.score),
+    score: parseJson('nations', r.id, 'score', r.score),
     createdAt: r.created_at,
   };
   if (r.last_attacked_at !== null) nation.lastAttackedAt = r.last_attacked_at;
@@ -110,7 +173,7 @@ export function regionToRow(seasonId: string, index: number, r: Region): RegionR
 }
 
 export function rowToRegion(r: RegionRow): Region {
-  return { id: r.id, name: r.name, bonuses: JSON.parse(r.bonuses) };
+  return { id: r.id, name: r.name, bonuses: parseJson('regions', r.id, 'bonuses', r.bonuses) };
 }
 
 export interface MarchRow {
@@ -173,11 +236,11 @@ export function treatyToRow(seasonId: string, t: Treaty): TreatyRow {
 export function rowToTreaty(r: TreatyRow): Treaty {
   return {
     id: r.id,
-    kind: r.kind as Treaty['kind'],
+    kind: assertEnum('treaties', r.id, 'kind', r.kind, TREATY_KINDS),
     aId: r.a_id,
     bId: r.b_id,
-    status: r.status as Treaty['status'],
-    terms: JSON.parse(r.terms),
+    status: assertEnum('treaties', r.id, 'status', r.status, TREATY_STATUSES),
+    terms: parseJson('treaties', r.id, 'terms', r.terms),
     createdAt: r.created_at,
   };
 }
@@ -210,8 +273,8 @@ export function rowToOrder(r: OrderRow): MarketOrder {
   return {
     id: r.id,
     nationId: r.nation_id,
-    kind: r.kind as MarketOrder['kind'],
-    side: r.side as MarketOrder['side'],
+    kind: assertEnum('market_orders', r.id, 'kind', r.kind, RESOURCE_KINDS),
+    side: assertEnum('market_orders', r.id, 'side', r.side, ORDER_SIDES),
     qty: r.qty,
     price: r.price,
     createdAt: r.created_at,
@@ -235,7 +298,10 @@ export function eventToRow(seasonId: string, id: string, e: GameEvent, createdAt
     tick: e.tick,
     type: e.type,
     nation_ids: JSON.stringify(e.nationIds),
-    payload: JSON.stringify(e.payload),
+    // finding #5:e.payload 為 undefined 時 JSON.stringify(undefined) === undefined(不是字串
+    // "undefined"),bind() 會拿到 undefined 值——D1/better-sqlite3 對此的行為不可靠(常是丟錯
+    // 或存成 NULL,NULL 又違反 payload TEXT NOT NULL)。統一存 JSON 'null' 字面量。
+    payload: JSON.stringify(e.payload) ?? 'null',
     created_at: createdAt,
   };
 }
@@ -243,8 +309,8 @@ export function eventToRow(seasonId: string, id: string, e: GameEvent, createdAt
 export function rowToEvent(r: EventRow): GameEvent {
   return {
     tick: r.tick,
-    type: r.type as GameEvent['type'],
-    nationIds: JSON.parse(r.nation_ids),
-    payload: JSON.parse(r.payload),
+    type: assertEnum('events', r.id, 'type', r.type, EVENT_TYPES),
+    nationIds: parseJson('events', r.id, 'nation_ids', r.nation_ids),
+    payload: parseJson('events', r.id, 'payload', r.payload),
   };
 }
