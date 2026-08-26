@@ -10,7 +10,8 @@ import type { Env } from '../db/types';
 import { requireSession } from '../middleware/requireSession';
 import { loadActiveWorld, findOwnNation, persistWorld } from '../game/state';
 import { POLICY_CHANGE_COST } from '../game/constants';
-import { completeTask } from '../db/repository';
+import { safeCompleteTask } from '../db/repository';
+import { parseJsonBody } from '../lib/parseBody';
 
 const AXIS_TIERS: Record<PolicyAxis, string[]> = {
   tax: ['low', 'mid', 'high'],
@@ -19,13 +20,21 @@ const AXIS_TIERS: Record<PolicyAxis, string[]> = {
   openness: ['closed', 'neutral', 'free'],
 };
 
+// finding #16:四軸白名單常數——`body.axis` 是不受信任的外部輸入,若直接拿去索引
+// `AXIS_TIERS[axis]`,像 `__proto__`/`constructor`/`toString` 這類 Object.prototype 上
+// 既有的屬性名會回傳非陣列的東西(例如 `AXIS_TIERS.__proto__` 是 Object.prototype 本身,
+// truthy),讓後面 `.includes(...)` 對非陣列值呼叫而丟未預期例外,或在其他寫法下造成
+// prototype pollution 風險。改成先過白名單陣列擋掉,只有落在四軸常數內才允許索引。
+const POLICY_AXES: PolicyAxis[] = ['tax', 'economy', 'conscription', 'openness'];
+
 const policyRoutes = new Hono<{ Bindings: Env }>();
 
 policyRoutes.post('/', requireSession, async (c) => {
   const { user } = c.get('session');
-  const body = await c.req.json<{ axis?: string; tier?: string }>().catch(() => ({}) as never);
-  const axis = body.axis as PolicyAxis | undefined;
-  if (!axis || !AXIS_TIERS[axis] || !body.tier || !AXIS_TIERS[axis].includes(body.tier)) {
+  const body = await parseJsonBody<{ axis?: string; tier?: string }>(c.req);
+  if (!body) return c.json({ error: 'INVALID_BODY' }, 400);
+  const axis = POLICY_AXES.includes(body.axis as PolicyAxis) ? (body.axis as PolicyAxis) : undefined;
+  if (!axis || !body.tier || !AXIS_TIERS[axis].includes(body.tier)) {
     return c.json({ error: 'INVALID_POLICY' }, 400);
   }
 
@@ -63,7 +72,7 @@ policyRoutes.post('/', requireSession, async (c) => {
 
   const now = Date.now();
   await persistWorld(c.env.DB, state, next, [], now);
-  await completeTask(c.env.DB, user.id, 'set_policy', now);
+  await safeCompleteTask(c.env.DB, user.id, 'set_policy', now);
 
   return c.json({ nation: updatedNation });
 });

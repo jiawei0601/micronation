@@ -5,11 +5,14 @@
 import { Hono } from 'hono';
 import type { Env } from './db/types';
 import { register, login, logout, verifyEmail, resendVerification } from './auth/service';
-import { ConsoleMailSender } from './auth/mail';
+import { ConsoleMailSender, ResendMailSender, type MailSender } from './auth/mail';
 import { buildSessionCookie, buildClearSessionCookie, parseSessionTokenFromCookieHeader } from './auth/session';
 import { requireSession } from './middleware/requireSession';
-import { completeTask } from './db/repository';
+import { safeCompleteTask } from './db/repository';
 import { CorruptRowError } from './db/rows';
+import { parseJsonBody } from './lib/parseBody';
+import { checkRateLimit, clientIp } from './lib/rateLimit';
+import { TICK_INTERVAL_MS } from './game/constants';
 import nationRoutes from './routes/nation';
 import worldRoutes from './routes/world';
 import buildRoutes from './routes/build';
@@ -25,34 +28,53 @@ import { runTick } from './tick/run';
 
 const app = new Hono<{ Bindings: Env }>();
 // export:整合測試(game.test.ts/tick.test.ts)用來取得最近一次寄出的驗證信明文 token——
-// register 之後 DB 只存 SHA-256 雜湊(finding #1/#13),測試沒有真的信箱可以收信。
+// register 之後 DB 只存 SHA-256 雜湊(finding #1/#13),測試沒有真的信箱可以收信。此為
+// 開發/測試預設值;正式環境若設定 env.RESEND_API_KEY,實際寄信會改走 ResendMailSender
+// (見下方 getMailSender,finding #21)。
 export const mailSender = new ConsoleMailSender();
 
+function getMailSender(env: Env): MailSender {
+  return env.RESEND_API_KEY ? new ResendMailSender(env.RESEND_API_KEY) : mailSender;
+}
+
+// finding #22:register/login/verify/resend 皆為未登入可打的公開端點,是暴力嘗試/濫用最常見
+// 的目標——每 IP 簡單計數,超限 429。門檻刻意設得比合理誤操作寬鬆(不希望正常使用者被誤擋),
+// 只擋明顯的自動化嘗試。
+const AUTH_RATE_LIMIT = { windowMs: 60_000, max: 20 };
+
+function authRateLimited(c: { req: { header(name: string): string | undefined } }, action: string): boolean {
+  const key = `${action}:${clientIp((name) => c.req.header(name))}`;
+  return !checkRateLimit(key, AUTH_RATE_LIMIT);
+}
+
 app.post('/api/auth/register', async (c) => {
-  const body = await c.req.json<{ email?: string; password?: string }>().catch(() => ({}) as never);
-  if (!body.email || !body.password) return c.json({ error: 'INVALID_BODY' }, 400);
+  if (authRateLimited(c, 'register')) return c.json({ error: 'RATE_LIMITED' }, 429);
+  const body = await parseJsonBody<{ email?: string; password?: string }>(c.req);
+  if (!body || !body.email || !body.password) return c.json({ error: 'INVALID_BODY' }, 400);
 
   const now = Date.now();
-  const result = await register(c.env.DB, mailSender, body.email, body.password, now);
+  const result = await register(c.env.DB, getMailSender(c.env), body.email, body.password, now);
   if (!result.ok) return c.json({ error: result.error }, 400);
-  await completeTask(c.env.DB, result.value.userId, 'register', now);
+  await safeCompleteTask(c.env.DB, result.value.userId, 'register', now);
   return c.json({ userId: result.value.userId, mailSent: result.value.mailSent }, 201);
 });
 
 // finding #16:register 寄信失敗時仍會成功建立帳號(mailSent:false)——這個端點讓使用者能
 // 重新觸發寄信。冪等:找不到帳號/已驗證都直接回應,不因重複呼叫而報錯或建立額外狀態。
 app.post('/api/auth/resend', async (c) => {
-  const body = await c.req.json<{ email?: string }>().catch(() => ({}) as never);
-  if (!body.email) return c.json({ error: 'INVALID_BODY' }, 400);
+  if (authRateLimited(c, 'resend')) return c.json({ error: 'RATE_LIMITED' }, 429);
+  const body = await parseJsonBody<{ email?: string }>(c.req);
+  if (!body || !body.email) return c.json({ error: 'INVALID_BODY' }, 400);
 
-  const result = await resendVerification(c.env.DB, mailSender, body.email, Date.now());
+  const result = await resendVerification(c.env.DB, getMailSender(c.env), body.email, Date.now());
   if (!result.ok) return c.json({ error: result.error }, 400);
   return c.json({ mailSent: result.value.mailSent });
 });
 
 app.post('/api/auth/login', async (c) => {
-  const body = await c.req.json<{ email?: string; password?: string }>().catch(() => ({}) as never);
-  if (!body.email || !body.password) return c.json({ error: 'INVALID_BODY' }, 400);
+  if (authRateLimited(c, 'login')) return c.json({ error: 'RATE_LIMITED' }, 429);
+  const body = await parseJsonBody<{ email?: string; password?: string }>(c.req);
+  if (!body || !body.email || !body.password) return c.json({ error: 'INVALID_BODY' }, 400);
 
   const now = Date.now();
   const result = await login(c.env.DB, body.email, body.password, now);
@@ -73,13 +95,14 @@ app.post('/api/auth/logout', async (c) => {
 });
 
 app.post('/api/auth/verify', async (c) => {
-  const body = await c.req.json<{ token?: string }>().catch(() => ({}) as never);
-  if (!body.token) return c.json({ error: 'INVALID_BODY' }, 400);
+  if (authRateLimited(c, 'verify')) return c.json({ error: 'RATE_LIMITED' }, 429);
+  const body = await parseJsonBody<{ token?: string }>(c.req);
+  if (!body || !body.token) return c.json({ error: 'INVALID_BODY' }, 400);
 
   const now = Date.now();
   const result = await verifyEmail(c.env.DB, body.token, now);
   if (!result.ok) return c.json({ error: result.error }, 400);
-  await completeTask(c.env.DB, result.value.userId, 'verify_email', now);
+  await safeCompleteTask(c.env.DB, result.value.userId, 'verify_email', now);
   return c.json({ ok: true });
 });
 
@@ -100,6 +123,10 @@ app.route('/api/messages', messagesRoutes);
 app.route('/api/rankings', rankingsRoutes);
 app.route('/api/tasks', tasksRoutes);
 app.route('/api/admin', adminRoutes);
+
+// finding #25:統一 404——未匹配任何路由(含打錯路徑/方法)一律回同樣的 { error } 格式,
+// 不落回 Hono 預設的純文字 404 body(與全站其餘錯誤回應格式不一致)。
+app.notFound((c) => c.json({ error: 'NOT_FOUND' }, 404));
 
 // finding #4:rows.ts 的解碼層對壞資料(手改 DB/未來 migration bug 等)丟 CorruptRowError,
 // 這裡統一攔截、記 log(附 table/rowId/field 供人工排查)、fail fast 回 500,不讓壞資料
@@ -125,8 +152,13 @@ export async function scheduled(
   ctx: { waitUntil(promise: Promise<unknown>): void }
 ): Promise<void> {
   const now = Date.now();
+  // finding #23/#29:用 Cron Trigger 提供的 scheduledTime(不是 Date.now())換算出「這次觸發
+  // 對應哪一個整點時槽」,runTick 內部比對 seasons.last_tick_slot,同一時槽已經跑過就跳過
+  // ——Cloudflare 對 scheduled handler 偶發重試(同一次觸發呼叫兩次)時不會讓 tick 多跑一次。
+  const scheduledSlot =
+    _event.scheduledTime !== undefined ? Math.floor(_event.scheduledTime / TICK_INTERVAL_MS) * TICK_INTERVAL_MS : undefined;
   ctx.waitUntil(
-    runTick(env.DB, { now }).then((result) => {
+    runTick(env.DB, { now, scheduledSlot }).then((result) => {
       if (!result.ranTick) {
         console.log(`[tick] skipped: ${result.skippedReason}`);
       } else {

@@ -1,7 +1,7 @@
 // M7 api 層共用讀寫輔助——「讀 WorldState(repository)→ 呼叫純模塊 → saveWorldState 差異寫回,
 // 單一 batch」的固定流程收攏在此,避免每個路由重複組裝。
 
-import type { WorldState, Nation, Id, GameEvent } from '@micronation/shared';
+import type { WorldState, Nation, Id, GameEvent, Trade } from '@micronation/shared';
 import type { D1Database } from '../db/types';
 import { loadWorldState, saveWorldState, getActiveSeasonId, getSeasonTickRunning } from '../db/repository';
 
@@ -46,7 +46,11 @@ export async function persistWorld(
   prev: WorldState,
   next: WorldState,
   events: GameEvent[],
-  now: number
+  now: number,
+  trades: Trade[] = []
 ): Promise<void> {
-  await saveWorldState(db, prev, next, events, now);
+  // finding #3:trades 與 nations/orders/events 一併交給 saveWorldState 的同一個 D1 batch,
+  // 不再由 applyPlaceOrder 各自獨立呼叫 insertTrades——避免「trades 已落地但 nations/orders
+  // 的差異寫回失敗」這種半吊子中間狀態。
+  await saveWorldState(db, prev, next, events, now, trades);
 }

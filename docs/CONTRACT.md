@@ -232,6 +232,43 @@ generateNpcNations(count: number, regions: Region[], seed: string): Result<Natio
 
 shared ← engine/market/diplomacy/military/npc ← api/tick-cron;web 只依賴 shared(型別+預覽公式)與 HTTP API。
 
+## api 層加固(2026-08-26,Codex 一審 routes/game/tick findings)
+
+- **市場成交結算(finding #1)**:packages/market 本身不碰 Nation.resources,由
+  `apps/api/src/game/actions.ts` 的 `applyPlaceOrder`/`applyCancelOrder` 負責:掛賣單即扣
+  `kind` 資源(escrow)、掛買單即扣 `qty×限價` 的 money;成交後賣方入帳「成交額−關稅」(關稅
+  系統回收=直接消失,不轉給任何第三方)、買方入帳貨物;taker 為買方時若實際成交價優於限價,
+  退回價差。撤單全額退回鎖定的資源。驗證順序:先讓 `market.placeOrder` 判定合法性
+  (PRICE_BAND/PROTECTED_LIMIT/UNVERIFIED...),市場判定通過後才做 escrow 資源足額檢查——避免
+  「資源不足」蓋掉原本該回的其他錯誤碼。
+- **跨區關稅估算(finding #2)**:單筆掛單可能吃進多個不同區域的對手單,`market.placeOrder`
+  只吃一個 tariffRate 參數。採保守方案——取本筆單所有候選對手中最高的關稅率
+  (`computeConservativeTariffRate`),高估傾向但不會讓玩家少繳。
+- **trades 落地時機(finding #3)**:`applyPlaceOrder` 不再自己呼叫 DB 寫入,trades 隨
+  `persistWorld`/`saveWorldState` 的同一個 batch 原子寫入(`db/repository.ts` 的
+  `tradeStmts`)。
+- **JSON body 解析(finding #9)**:全站 POST 路由改走 `apps/api/src/lib/parseBody.ts` 的
+  `parseJsonBody`——陣列/`null`/壞 JSON 一律回 400 INVALID_BODY。
+- **開季併發(finding #10)**:`migrations/0005_hardening2.sql` 加 `idx_seasons_one_active`
+  (partial unique index),`createSeason` 撞鍵時拋 `SeasonAlreadyActiveError`,admin.ts 轉譯
+  回 409。
+- **一國一владелец(finding #18)**:靠 `insertNewNation`(純 INSERT,非既有 diff 機制的
+  `INSERT OR REPLACE`)撞 `idx_nations_season_owner` 唯一索引把關,轉譯回 400
+  ALREADY_HAS_NATION。
+- **訊息(finding #20)**:`GET /api/messages` 支援 `?before=`(rowid cursor)+`limit`(上限
+  100)分頁,回傳含 `nextCursor`;`POST /api/messages` 每國每 tick 上限 10 則(超過 429
+  RATE_LIMITED),id 改用 `claimNextMessageSeq` 單調序號。
+- **`/api/world` 事件輪詢(finding #24)**:回應多一個 `nextCursor` 欄位(events 最後一筆的
+  seq,或維持原本 since)。
+- **tick-cron(finding #23/#27/#28/#29)**:`seasons.tick_running` 改存時間戳
+  (`tick_running_since`),逾 10 分鐘視為 stale、下一輪可接管;`scheduled()` 用 Cron 的
+  `scheduledTime` 換算「目標時槽」寫入 `seasons.last_tick_slot`,同一時槽已處理過會跳過
+  (`ALREADY_PROCESSED_SLOT`);賽季到期結算改成先 `saveWorldState`(最後一 tick 落地)成功後
+  才呼叫 `finalizeSeason`(名人堂+`status='ended'` 合成單一 batch)。
+- **排行榜/名人堂同分決定性排序(finding #26/#32)**:皆加 nation id 當 tie-breaker。
+- **玩家初始值(finding #19)**:搬進 `apps/api/src/game/constants.ts` 的
+  `PLAYER_INITIAL_*`,`routes/nation.ts` 引用同一份,不再自己重複定義。
+
 ## Monorepo
 
 npm workspaces:`packages/{shared,engine,market,diplomacy,military,npc}` + `apps/{api,web}`。測試 vitest,root `npm test` 全跑。TypeScript strict。

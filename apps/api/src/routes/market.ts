@@ -2,12 +2,12 @@
 
 import { Hono } from 'hono';
 import type { NewOrder, ResourceKind, OrderSide } from '@micronation/shared';
-import { cancelOrder } from '@micronation/market';
 import type { Env } from '../db/types';
 import { requireSession } from '../middleware/requireSession';
 import { loadActiveWorld, findOwnNation, persistWorld } from '../game/state';
-import { applyPlaceOrder } from '../game/actions';
-import { completeTask } from '../db/repository';
+import { applyPlaceOrder, applyCancelOrder } from '../game/actions';
+import { safeCompleteTask } from '../db/repository';
+import { parseJsonBody } from '../lib/parseBody';
 
 const RESOURCE_KINDS: ResourceKind[] = ['food', 'ore', 'fuel', 'money'];
 const ORDER_SIDES: OrderSide[] = ['buy', 'sell'];
@@ -22,8 +22,9 @@ marketRoutes.get('/', async (c) => {
 
 marketRoutes.post('/', requireSession, async (c) => {
   const { user } = c.get('session');
-  const body = await c.req.json<Partial<NewOrder>>().catch(() => ({}) as never);
+  const body = await parseJsonBody<Partial<NewOrder>>(c.req);
   if (
+    !body ||
     !body.kind ||
     !RESOURCE_KINDS.includes(body.kind) ||
     !body.side ||
@@ -47,8 +48,10 @@ marketRoutes.post('/', requireSession, async (c) => {
 
   const next = result.value.state;
   const now = Date.now();
-  await persistWorld(c.env.DB, state, next, [], now);
-  await completeTask(c.env.DB, user.id, 'place_order', now);
+  // finding #1/#3:成交後的資源結算已在 applyPlaceOrder 內完成(next.nations 已含最新餘額),
+  // trades 隨同 nations/orders 差異一起交給 persistWorld,同一 batch 原子寫入。
+  await persistWorld(c.env.DB, state, next, [], now, result.value.trades);
+  await safeCompleteTask(c.env.DB, user.id, 'place_order', now);
 
   return c.json({ book: next.orders, trades: result.value.trades, unbanded: result.value.unbanded }, 201);
 });
@@ -64,15 +67,17 @@ marketRoutes.delete('/:id', requireSession, async (c) => {
   const nation = findOwnNation(state, user.id);
   if (!nation) return c.json({ error: 'NO_NATION' }, 404);
 
-  const result = cancelOrder(state.orders, orderId, nation.id);
+  // finding #1:撤單走 applyCancelOrder(game/actions.ts)——除了原本的 market.cancelOrder
+  // 合法性檢查,還會把掛單時鎖定(escrow)的資源/金錢退回。
+  const result = applyCancelOrder(state, nation.id, orderId);
   if (!result.ok) return c.json({ error: result.error }, result.error === 'FORBIDDEN' ? 403 : 404);
 
-  const next = { ...state, orders: result.value.book };
+  const next = result.value.state;
   const now = Date.now();
   await persistWorld(c.env.DB, state, next, [], now);
-  await completeTask(c.env.DB, user.id, 'cancel_order', now);
+  await safeCompleteTask(c.env.DB, user.id, 'cancel_order', now);
 
-  return c.json({ book: result.value.book });
+  return c.json({ book: next.orders });
 });
 
 export default marketRoutes;

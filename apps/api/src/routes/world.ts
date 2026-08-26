@@ -28,17 +28,22 @@ worldRoutes.get('/', async (c) => {
   // (web)只需要把上次回應裡每筆事件的 `seq` 取最大值,原封不動帶回下次的 `since` 即可,不需要
   // 自己再去湊 tick。首次輪詢帶 0(或省略 since 直接不帶 events)。
   const sinceParam = c.req.query('since');
-  let events: unknown[] = [];
+  let events: { seq: number }[] = [];
+  let nextCursor: number | null = null;
   if (sinceParam !== undefined && viewerId) {
     const since = Number(sinceParam);
     if (!Number.isFinite(since)) return c.json({ error: 'INVALID_SINCE' }, 400);
     events = await getEventsSince(c.env.DB, world.seasonId, since, viewerId);
+    // finding #24:回傳 nextCursor——有拿到事件時是最後一筆的 seq(下次帶回這個值繼續往後拿);
+    // 沒拿到新事件時維持呼叫端原本的 since,不倒退。
+    nextCursor = events.length > 0 ? events[events.length - 1].seq : since;
   }
 
   return c.json({
     view,
     nextTickAt: nextTickAt(Date.now()),
     events,
+    nextCursor,
   });
 });
 

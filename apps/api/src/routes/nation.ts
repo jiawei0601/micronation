@@ -1,30 +1,23 @@
 // /api/nation — GET 自己完整國家、GET /:id 公開視圖、POST 開國。
 
 import { Hono } from 'hono';
-import type { Nation, Policies } from '@micronation/shared';
+import type { Nation } from '@micronation/shared';
 import { toPublicWorldView, PROTECTION_TICKS, makeId } from '@micronation/shared';
 import type { Env } from '../db/types';
 import { requireSession } from '../middleware/requireSession';
-import { loadActiveWorld, findOwnNation, persistWorld } from '../game/state';
+import { loadActiveWorld, findOwnNation } from '../game/state';
 import { isNameAllowed, isValidFlagSpec } from '../game/constants';
-import { completeTask } from '../db/repository';
-
-const NPC_LIKE_INITIAL_RESOURCES = { food: 300, ore: 200, fuel: 100, money: 500 };
-const NPC_LIKE_INITIAL_BUILDINGS = {
-  farm: 1,
-  mine: 1,
-  refinery: 0,
-  market: 0,
-  barracks: 0,
-  warehouse: 0,
-  university: 0,
-  wall: 0,
-} as const;
-const PLAYER_INITIAL_POLICIES: Policies = { tax: 'mid', economy: 'agri', conscription: 'volunteer', openness: 'neutral' };
-const PLAYER_INITIAL_ACTION_POINTS = 5;
-const PLAYER_INITIAL_POPULATION = 100;
-const PLAYER_INITIAL_MORALE = 60;
-const PLAYER_INITIAL_ARMY_SIZE = 10;
+import {
+  PLAYER_INITIAL_RESOURCES,
+  PLAYER_INITIAL_BUILDINGS,
+  PLAYER_INITIAL_POLICIES,
+  PLAYER_INITIAL_ACTION_POINTS,
+  PLAYER_INITIAL_POPULATION,
+  PLAYER_INITIAL_MORALE,
+  PLAYER_INITIAL_ARMY_SIZE,
+} from '../game/constants';
+import { safeCompleteTask, insertNewNation, NationAlreadyFoundedError } from '../db/repository';
+import { parseJsonBody } from '../lib/parseBody';
 
 const nationRoutes = new Hono<{ Bindings: Env }>();
 
@@ -49,13 +42,15 @@ nationRoutes.get('/:id', async (c) => {
 
 nationRoutes.post('/', requireSession, async (c) => {
   const { user } = c.get('session');
-  const body = await c.req.json<{ name?: string; flag?: unknown; regionId?: string }>().catch(() => ({}) as never);
+  const body = (await parseJsonBody<{ name?: string; flag?: unknown; regionId?: string }>(c.req)) ?? {};
 
   const world = await loadActiveWorld(c.env.DB);
   if (!world) return c.json({ error: 'NO_ACTIVE_SEASON' }, 400);
   if (world.tickRunning) return c.json({ error: 'TICK_IN_PROGRESS' }, 503);
   const { state } = world;
 
+  // finding #18:這裡的記憶體檢查只是提早失敗、省一次 DB 寫入——真正的一國一владелец把關在
+  // insertNewNation 的 DB 唯一索引(下方 catch NationAlreadyFoundedError)。
   if (findOwnNation(state, user.id)) return c.json({ error: 'ALREADY_HAS_NATION' }, 400);
   if (!body.name || !isNameAllowed(body.name)) return c.json({ error: 'INVALID_NAME' }, 400);
   if (!isValidFlagSpec(body.flag)) return c.json({ error: 'INVALID_FLAG' }, 400);
@@ -86,12 +81,12 @@ nationRoutes.post('/', requireSession, async (c) => {
     name: body.name.trim(),
     flag: body.flag as Nation['flag'],
     regionId,
-    resources: { ...NPC_LIKE_INITIAL_RESOURCES },
+    resources: { ...PLAYER_INITIAL_RESOURCES },
     tech: 0,
     actionPoints: PLAYER_INITIAL_ACTION_POINTS,
     population: PLAYER_INITIAL_POPULATION,
     morale: PLAYER_INITIAL_MORALE,
-    buildings: { ...NPC_LIKE_INITIAL_BUILDINGS },
+    buildings: { ...PLAYER_INITIAL_BUILDINGS },
     buildQueue: [],
     army: { size: PLAYER_INITIAL_ARMY_SIZE },
     policies: { ...PLAYER_INITIAL_POLICIES },
@@ -102,9 +97,13 @@ nationRoutes.post('/', requireSession, async (c) => {
     createdAt: state.tick,
   };
 
-  const next = { ...state, nations: [...state.nations, nation] };
-  await persistWorld(c.env.DB, state, next, [], now);
-  await completeTask(c.env.DB, user.id, 'found_nation', now);
+  try {
+    await insertNewNation(c.env.DB, world.seasonId, nation);
+  } catch (e) {
+    if (e instanceof NationAlreadyFoundedError) return c.json({ error: 'ALREADY_HAS_NATION' }, 400);
+    throw e;
+  }
+  await safeCompleteTask(c.env.DB, user.id, 'found_nation', now);
 
   return c.json({ nation }, 201);
 });

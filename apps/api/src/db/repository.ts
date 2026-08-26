@@ -71,6 +71,22 @@ export async function loadWorldState(db: D1Database, seasonId: Id): Promise<Worl
   };
 }
 
+/** finding #10:createSeason 的 INSERT 撞 idx_seasons_one_active(併發開季)時,底層拋出的是
+ * driver 原生的 constraint 錯誤(SQLite: `UNIQUE constraint failed`;D1 亦同錯誤字串型態)。
+ * 呼叫端(admin.ts)接到這個型別的錯誤才知道要回 409 SEASON_ALREADY_ACTIVE,而不是當成
+ * 500 INTERNAL_ERROR。 */
+export class SeasonAlreadyActiveError extends Error {
+  constructor() {
+    super('SEASON_ALREADY_ACTIVE');
+    this.name = 'SeasonAlreadyActiveError';
+  }
+}
+
+function isUniqueConstraintError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /unique constraint/i.test(msg);
+}
+
 /** 建立新賽季(初始 WorldState 全量寫入,regions 依陣列序寫入 region_index)。 */
 export async function createSeason(
   db: D1Database,
@@ -98,7 +114,12 @@ export async function createSeason(
   for (const m of state.marches) stmts.push(insertMarchStmt(db, state.seasonId, m));
   for (const t of state.treaties) stmts.push(insertTreatyStmt(db, state.seasonId, t));
   for (const o of state.orders) stmts.push(insertOrderStmt(db, state.seasonId, o));
-  await runBatch(db, stmts);
+  try {
+    await runBatch(db, stmts);
+  } catch (e) {
+    if (isUniqueConstraintError(e)) throw new SeasonAlreadyActiveError();
+    throw e;
+  }
 }
 
 /**
@@ -112,9 +133,12 @@ export async function saveWorldState(
   prev: WorldState | null,
   next: WorldState,
   newEvents: GameEvent[],
-  eventCreatedAt: number
+  eventCreatedAt: number,
+  trades: Trade[] = []
 ): Promise<void> {
   const stmts: D1PreparedStatement[] = [];
+  // finding #3:trades 併入本次 batch,與 nations/orders/events 一起原子寫入。
+  stmts.push(...tradeStmts(db, next.seasonId, trades));
 
   // events.id 用 seasons.next_event_seq 單調遞增序號組成(見 0002 migration 註解)——
   // 同一 tick 內可能有多次 saveWorldState 呼叫(玩家操作觸發,不像 tick-cron 只跑一次),
@@ -215,6 +239,63 @@ function insertNationStmt(db: D1Database, seasonId: string, n: WorldState['natio
       r.created_at,
       r.last_attacked_at
     );
+}
+
+/** finding #18:開國原本只靠讀取時的 `findOwnNation(state, user.id)` 記憶體檢查擋「一國一владелец」,
+ * 有 TOCTOU 窗口(兩個並發開國請求都可能讀到「還沒有國家」)。真正把關在 DB 唯一索引
+ * (idx_nations_season_owner,migrations/0004_hardening.sql)——但 saveWorldState 既有的
+ * insertNationStmt 用 `INSERT OR REPLACE`,REPLACE 語意是「先刪掉撞鍵的舊 row 再插入新
+ * row」,根本不會觸發 UNIQUE 違規錯誤(等於靜默覆蓋掉舊國家!)。開國走專用的純 INSERT
+ * (不是 REPLACE),撞唯一索引時才會是真正的錯誤,可轉譯回 ALREADY_FOUNDED。 */
+export class NationAlreadyFoundedError extends Error {
+  constructor() {
+    super('ALREADY_FOUNDED');
+    this.name = 'NationAlreadyFoundedError';
+  }
+}
+
+export async function insertNewNation(db: D1Database, seasonId: string, n: WorldState['nations'][number]): Promise<void> {
+  const r = nationToRow(seasonId, n);
+  try {
+    await db
+      .prepare(
+        `INSERT INTO nations
+        (id, season_id, owner_id, name, flag, region_id, resource_food, resource_ore, resource_fuel, resource_money,
+         tech, action_points, population, morale, buildings, build_queue, army_size, policies, policy_changed_at,
+         reputation_breaches, protected_until, score, created_at, last_attacked_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(
+        r.id,
+        r.season_id,
+        r.owner_id,
+        r.name,
+        r.flag,
+        r.region_id,
+        r.resource_food,
+        r.resource_ore,
+        r.resource_fuel,
+        r.resource_money,
+        r.tech,
+        r.action_points,
+        r.population,
+        r.morale,
+        r.buildings,
+        r.build_queue,
+        r.army_size,
+        r.policies,
+        r.policy_changed_at,
+        r.reputation_breaches,
+        r.protected_until,
+        r.score,
+        r.created_at,
+        r.last_attacked_at
+      )
+      .run();
+  } catch (e) {
+    if (isUniqueConstraintError(e)) throw new NationAlreadyFoundedError();
+    throw e;
+  }
 }
 
 function insertMarchStmt(db: D1Database, seasonId: string, m: WorldState['marches'][number]): D1PreparedStatement {
@@ -391,28 +472,63 @@ async function claimEventSeqRange(db: D1Database, seasonId: Id, count: number): 
 
 // ---- tick-cron 競態緩解旗標(M8) ----
 
-/** runTick 開頭讀取:旗標為真代表本賽季已有一次 tick 正在跑,呼叫端應跳過本輪。 */
-export async function getSeasonTickRunning(db: D1Database, seasonId: Id): Promise<boolean> {
-  const row = await db
-    .prepare('SELECT tick_running FROM seasons WHERE id = ?')
-    .bind(seasonId)
-    .first<{ tick_running: number }>();
-  return !!row?.tick_running;
+/** finding #28:tick_running 改存「什麼時候開始跑」的時間戳(tick_running_since),不是單純
+ * 布林——runTick 若中途崩潰(未執行到 finally 的清旗標,例如整個 Worker 被強制終止),旗標會
+ * 卡死永遠是 true,玩家寫入路由永遠 503。改存時間戳後,呼叫端可判斷「超過門檻(見
+ * TICK_RUNNING_STALE_MS)沒更新」視為 stale、可搶(下一次 runTick 直接接管)。 */
+export const TICK_RUNNING_STALE_MS = 10 * 60 * 1000;
+
+export interface TickRunningState {
+  running: boolean;
+  since: number | null;
 }
 
-export async function setSeasonTickRunning(db: D1Database, seasonId: Id, running: boolean): Promise<void> {
+export async function getSeasonTickRunningState(db: D1Database, seasonId: Id): Promise<TickRunningState> {
+  const row = await db
+    .prepare('SELECT tick_running, tick_running_since FROM seasons WHERE id = ?')
+    .bind(seasonId)
+    .first<{ tick_running: number; tick_running_since: number | null }>();
+  return { running: !!row?.tick_running, since: row?.tick_running_since ?? null };
+}
+
+/** 舊介面(單純布林)——供 game/state.ts loadActiveWorld 沿用:stale 的旗標視為「未在跑」,
+ * 避免真正卡死的旗標永久擋住玩家寫入路由。 */
+export async function getSeasonTickRunning(db: D1Database, seasonId: Id, now: number = Date.now()): Promise<boolean> {
+  const { running, since } = await getSeasonTickRunningState(db, seasonId);
+  if (!running) return false;
+  if (since !== null && now - since > TICK_RUNNING_STALE_MS) return false; // stale,視為未在跑
+  return true;
+}
+
+export async function setSeasonTickRunning(db: D1Database, seasonId: Id, running: boolean, now: number = Date.now()): Promise<void> {
   await db
-    .prepare('UPDATE seasons SET tick_running = ? WHERE id = ?')
-    .bind(running ? 1 : 0, seasonId)
+    .prepare('UPDATE seasons SET tick_running = ?, tick_running_since = ? WHERE id = ?')
+    .bind(running ? 1 : 0, running ? now : null, seasonId)
     .run();
 }
 
-/** 賽季到期結算——標記 ended,不刪資料(名人堂/歷史查詢仍可能需要)。 */
+/** 賽季到期結算——標記 ended,不刪資料(名人堂/歷史查詢仍可能需要)。
+ * finding #27:一般情況請改用 finalizeSeason(名人堂+ended 標記同一 batch),這裡保留單獨版本
+ * 供其他可能只需要單獨標記 ended、不牽涉名人堂的呼叫端使用(目前無,保留介面對稱性)。 */
 export async function markSeasonEnded(db: D1Database, seasonId: Id, endedAt: number): Promise<void> {
   await db
     .prepare("UPDATE seasons SET status = 'ended', ended_at = ? WHERE id = ?")
     .bind(endedAt, seasonId)
     .run();
+}
+
+/** finding #23/#29:scheduled() 用 Cron Trigger 的 scheduledTime 換算出的「目標 tick 時槽」
+ * 讀寫——用來判斷同一時槽是否已經處理過(冪等)。 */
+export async function getSeasonLastTickSlot(db: D1Database, seasonId: Id): Promise<number | null> {
+  const row = await db
+    .prepare('SELECT last_tick_slot FROM seasons WHERE id = ?')
+    .bind(seasonId)
+    .first<{ last_tick_slot: number | null }>();
+  return row?.last_tick_slot ?? null;
+}
+
+export async function setSeasonLastTickSlot(db: D1Database, seasonId: Id, slot: number): Promise<void> {
+  await db.prepare('UPDATE seasons SET last_tick_slot = ? WHERE id = ?').bind(slot, seasonId).run();
 }
 
 export interface HallOfFameEntry {
@@ -426,9 +542,8 @@ export interface HallOfFameEntry {
   category: string | null;
 }
 
-export async function insertHallOfFameEntries(db: D1Database, entries: HallOfFameEntry[], createdAt: number): Promise<void> {
-  if (entries.length === 0) return;
-  const stmts = entries.map((e, i) =>
+function hallOfFameStmts(db: D1Database, entries: HallOfFameEntry[], createdAt: number): D1PreparedStatement[] {
+  return entries.map((e, i) =>
     db
       .prepare(
         `INSERT INTO hall_of_fame (id, season_id, nation_id, nation_name, owner_id, final_score, rank, category, created_at)
@@ -446,14 +561,35 @@ export async function insertHallOfFameEntries(db: D1Database, entries: HallOfFam
         createdAt
       )
   );
+}
+
+export async function insertHallOfFameEntries(db: D1Database, entries: HallOfFameEntry[], createdAt: number): Promise<void> {
+  if (entries.length === 0) return;
+  await runBatch(db, hallOfFameStmts(db, entries, createdAt));
+}
+
+/** finding #27/#32:賽季結算——hall_of_fame 寫入與 seasons.status='ended' 標記合成單一 batch
+ * 一起原子提交,且必須在呼叫端已完成 saveWorldState(最後一次 tick 的狀態落地)之後才呼叫
+ * (見 tick/run.ts runTick 呼叫順序註解),避免「名人堂已經寫了,但最後一 tick 的資源/分數
+ * 其實沒存到 DB」這種不一致。 */
+export async function finalizeSeason(
+  db: D1Database,
+  seasonId: Id,
+  entries: HallOfFameEntry[],
+  endedAt: number
+): Promise<void> {
+  const stmts: D1PreparedStatement[] = [
+    ...hallOfFameStmts(db, entries, endedAt),
+    db.prepare("UPDATE seasons SET status = 'ended', ended_at = ? WHERE id = ?").bind(endedAt, seasonId),
+  ];
   await runBatch(db, stmts);
 }
 
 // ---- trades(市場成交紀錄,供 PriceRef 近期均價計算) ----
 
-export async function insertTrades(db: D1Database, seasonId: Id, trades: Trade[]): Promise<void> {
-  if (trades.length === 0) return;
-  const stmts = trades.map((t) =>
+/** finding #3:抽出成純組裝函式(不自行呼叫 db.batch),供 saveWorldState 併入同一 batch。 */
+export function tradeStmts(db: D1Database, seasonId: Id, trades: Trade[]): D1PreparedStatement[] {
+  return trades.map((t) =>
     db
       .prepare(
         `INSERT INTO trades
@@ -462,7 +598,6 @@ export async function insertTrades(db: D1Database, seasonId: Id, trades: Trade[]
       )
       .bind(t.id, seasonId, t.buyOrderId, t.sellOrderId, t.buyerId, t.sellerId, t.kind, t.qty, t.price, t.tariff, t.tick)
   );
-  await runBatch(db, stmts);
 }
 
 const RESOURCE_KINDS: ResourceKind[] = ['food', 'ore', 'fuel', 'money'];
@@ -534,31 +669,65 @@ export interface MessageRow {
   body: string;
   created_at: number;
   read_at: number | null;
+  tick: number;
 }
 
 export async function insertMessage(db: D1Database, row: MessageRow): Promise<void> {
   await db
     .prepare(
-      'INSERT INTO messages (id, season_id, from_nation_id, to_nation_id, body, created_at, read_at) VALUES (?, ?, ?, ?, ?, ?, NULL)'
+      'INSERT INTO messages (id, season_id, from_nation_id, to_nation_id, body, created_at, read_at, tick) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)'
     )
-    .bind(row.id, row.season_id, row.from_nation_id, row.to_nation_id, row.body, row.created_at)
+    .bind(row.id, row.season_id, row.from_nation_id, row.to_nation_id, row.body, row.created_at, row.tick)
     .run();
 }
 
-export const MESSAGES_LIST_LIMIT = 100; // finding #12
+/** finding #20:訊息 id 的單調遞增序號,比照 claimNextOrderSeq 的原子手法。 */
+export async function claimNextMessageSeq(db: D1Database, seasonId: Id): Promise<number> {
+  const row = await db
+    .prepare('UPDATE seasons SET next_message_seq = next_message_seq + 1 WHERE id = ? RETURNING next_message_seq - 1 AS seq')
+    .bind(seasonId)
+    .first<{ seq: number }>();
+  if (row === null) throw new Error(`SEASON_NOT_FOUND: ${seasonId}`);
+  return row.seq;
+}
 
+/** finding #20:每國每 tick 最多送幾則訊息的簡單速率限制——查詢本 tick 已送出的筆數。 */
+export async function countMessagesSentInTick(db: D1Database, fromNationId: Id, tick: number): Promise<number> {
+  const row = await db
+    .prepare('SELECT COUNT(*) AS n FROM messages WHERE from_nation_id = ? AND tick = ?')
+    .bind(fromNationId, tick)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+export const MESSAGES_LIST_LIMIT = 100; // finding #12/#20
+
+/** finding #20:分頁——`before`(訊息 rowid cursor,不傳則從最新開始)+ limit(上限 100)。
+ * 回傳含 nextCursor:還有更舊的資料時,呼叫端下次帶這個值繼續往前翻;無更多資料則為 null。 */
 export async function listMessagesForNation(
   db: D1Database,
   nationId: Id,
   box: 'inbox' | 'sent',
-  limit: number = MESSAGES_LIST_LIMIT
-): Promise<MessageRow[]> {
+  opts: { before?: number; limit?: number } = {}
+): Promise<{ messages: (MessageRow & { seq: number })[]; nextCursor: number | null }> {
   const column = box === 'inbox' ? 'to_nation_id' : 'from_nation_id';
-  const res = await db
-    .prepare(`SELECT * FROM messages WHERE ${column} = ? ORDER BY created_at DESC LIMIT ?`)
-    .bind(nationId, limit)
-    .all<MessageRow>();
-  return res.results;
+  const limit = Math.min(Math.max(1, opts.limit ?? MESSAGES_LIST_LIMIT), MESSAGES_LIST_LIMIT);
+  const before = opts.before;
+  const res =
+    before === undefined
+      ? await db
+          .prepare(`SELECT rowid AS seq, * FROM messages WHERE ${column} = ? ORDER BY rowid DESC LIMIT ?`)
+          .bind(nationId, limit + 1)
+          .all<MessageRow & { seq: number }>()
+      : await db
+          .prepare(`SELECT rowid AS seq, * FROM messages WHERE ${column} = ? AND rowid < ? ORDER BY rowid DESC LIMIT ?`)
+          .bind(nationId, before, limit + 1)
+          .all<MessageRow & { seq: number }>();
+
+  const rows = res.results;
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  return { messages: page, nextCursor: hasMore ? page[page.length - 1].seq : null };
 }
 
 // ---- tasks(教學任務鏈進度) ----
@@ -588,4 +757,14 @@ export async function completeTask(db: D1Database, userId: string, taskKey: stri
     .prepare('INSERT OR IGNORE INTO tasks (id, user_id, task_key, completed_at, created_at) VALUES (?, ?, ?, ?, ?)')
     .bind(makeId('task', userId, taskKey), userId, taskKey, now, now)
     .run();
+}
+
+/** finding #14:任務進度屬附屬效果——寫入失敗不可讓整個動作(build/messages/auth...)500。
+ * 呼叫端一律改用這個包 try/catch 的版本,失敗只記 log,不往上拋。 */
+export async function safeCompleteTask(db: D1Database, userId: string, taskKey: string, now: number): Promise<void> {
+  try {
+    await completeTask(db, userId, taskKey, now);
+  } catch (e) {
+    console.error(`[tasks] completeTask failed: user=${userId} key=${taskKey}`, e);
+  }
 }

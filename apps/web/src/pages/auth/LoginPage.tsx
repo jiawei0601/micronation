@@ -1,19 +1,26 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { t } from '../../i18n/zh-Hant';
+import { authFn, authErrorMessage } from '../../api/auth';
 
 export function LoginPage() {
   const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [error] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    // 後端登入路由尚未接上(apps/api/src/auth 尚未掛 HTTP route):目前直接導向地圖。
     setSubmitting(true);
-    navigate('/');
+    setError(null);
+    try {
+      await authFn.login(email, password);
+      navigate('/');
+    } catch (err) {
+      setError(authErrorMessage(err));
+      setSubmitting(false);
+    }
   }
 
   return (

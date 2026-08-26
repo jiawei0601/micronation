@@ -1,19 +1,26 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { t } from '../../i18n/zh-Hant';
+import { authFn, authErrorMessage } from '../../api/auth';
 
 export function RegisterPage() {
   const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [error] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    // 後端登入路由尚未接上(apps/api/src/auth 尚未掛 HTTP route):註冊後直接進入開國流程。
     setSubmitting(true);
-    navigate('/founding');
+    setError(null);
+    try {
+      await authFn.register(email, password);
+      navigate('/founding');
+    } catch (err) {
+      setError(authErrorMessage(err));
+      setSubmitting(false);
+    }
   }
 
   return (

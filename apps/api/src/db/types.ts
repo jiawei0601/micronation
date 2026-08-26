@@ -35,4 +35,8 @@ export interface D1Database {
 export interface Env {
   DB: D1Database;
   ADMIN_TOKEN?: string;
+  /** finding #21:有設定時 index.ts 切換到真實 MailSender(Resend API)stub 介面;
+   * 未設定(本地/測試)一律用 ConsoleMailSender。真正呼叫 Resend REST API 的實作留 TODO
+   * (需要正式帳號才能驗證串接是否正確,非本次任務範圍)。 */
+  RESEND_API_KEY?: string;
 }

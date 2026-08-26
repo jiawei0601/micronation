@@ -8,7 +8,8 @@ import type { Env } from '../db/types';
 import { requireSession } from '../middleware/requireSession';
 import { loadActiveWorld, findOwnNation, persistWorld } from '../game/state';
 import { applyBuild } from '../game/actions';
-import { completeTask } from '../db/repository';
+import { safeCompleteTask } from '../db/repository';
+import { parseJsonBody } from '../lib/parseBody';
 
 const BUILDING_KINDS: BuildingKind[] = ['farm', 'mine', 'refinery', 'market', 'barracks', 'warehouse', 'university', 'wall'];
 
@@ -16,7 +17,8 @@ const buildRoutes = new Hono<{ Bindings: Env }>();
 
 buildRoutes.post('/', requireSession, async (c) => {
   const { user } = c.get('session');
-  const body = await c.req.json<{ building?: string }>().catch(() => ({}) as never);
+  const body = await parseJsonBody<{ building?: string }>(c.req);
+  if (!body) return c.json({ error: 'INVALID_BODY' }, 400);
   const building = body.building as BuildingKind | undefined;
   if (!building || !BUILDING_KINDS.includes(building)) return c.json({ error: 'INVALID_BUILDING' }, 400);
 
@@ -34,7 +36,7 @@ buildRoutes.post('/', requireSession, async (c) => {
 
   const now = Date.now();
   await persistWorld(c.env.DB, state, next, [], now);
-  await completeTask(c.env.DB, user.id, 'build_first', now);
+  await safeCompleteTask(c.env.DB, user.id, 'build_first', now);
 
   return c.json({ nation: updatedNation });
 });

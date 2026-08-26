@@ -384,11 +384,13 @@ describe('finding #12 — 查詢加 LIMIT 常數', () => {
         body: `msg-${i}`,
         created_at: i,
         read_at: null,
+        tick: 0,
       });
     }
 
     const inbox = await listMessagesForNation(db, 'nation-a', 'inbox');
-    expect(inbox.length).toBe(MESSAGES_LIST_LIMIT);
+    expect(inbox.messages.length).toBe(MESSAGES_LIST_LIMIT);
+    expect(inbox.nextCursor).not.toBeNull();
   });
 });
 

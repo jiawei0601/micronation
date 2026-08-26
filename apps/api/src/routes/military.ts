@@ -3,20 +3,21 @@
 // 行動點扣除在 api 層(declareAttack 只檢查不扣除)。
 
 import { Hono } from 'hono';
-import { ATTACK_ACTION_POINT_COST } from '@micronation/shared';
+import { ATTACK_ACTION_POINT_COST, toPublicWorldView } from '@micronation/shared';
 import { declareAttack, recallMarch } from '@micronation/military';
 import type { Env } from '../db/types';
 import { requireSession } from '../middleware/requireSession';
 import { loadActiveWorld, findOwnNation, persistWorld } from '../game/state';
 import { applyTrain } from '../game/actions';
-import { completeTask } from '../db/repository';
+import { safeCompleteTask } from '../db/repository';
+import { parseJsonBody } from '../lib/parseBody';
 
 const militaryRoutes = new Hono<{ Bindings: Env }>();
 
 militaryRoutes.post('/attack', requireSession, async (c) => {
   const { user } = c.get('session');
-  const body = await c.req.json<{ defenderId?: string; army?: number }>().catch(() => ({}) as never);
-  if (!body.defenderId || typeof body.army !== 'number') return c.json({ error: 'INVALID_BODY' }, 400);
+  const body = await parseJsonBody<{ defenderId?: string; army?: number }>(c.req);
+  if (!body || !body.defenderId || typeof body.army !== 'number') return c.json({ error: 'INVALID_BODY' }, 400);
 
   const world = await loadActiveWorld(c.env.DB);
   if (!world) return c.json({ error: 'NO_ACTIVE_SEASON' }, 400);
@@ -39,15 +40,15 @@ militaryRoutes.post('/attack', requireSession, async (c) => {
 
   const now = Date.now();
   await persistWorld(c.env.DB, state, next, [], now);
-  await completeTask(c.env.DB, user.id, 'declare_attack', now);
+  await safeCompleteTask(c.env.DB, user.id, 'declare_attack', now);
 
   return c.json({ march: result.value.march }, 201);
 });
 
 militaryRoutes.post('/recall', requireSession, async (c) => {
   const { user } = c.get('session');
-  const body = await c.req.json<{ marchId?: string }>().catch(() => ({}) as never);
-  if (!body.marchId) return c.json({ error: 'INVALID_BODY' }, 400);
+  const body = await parseJsonBody<{ marchId?: string }>(c.req);
+  if (!body || !body.marchId) return c.json({ error: 'INVALID_BODY' }, 400);
 
   const world = await loadActiveWorld(c.env.DB);
   if (!world) return c.json({ error: 'NO_ACTIVE_SEASON' }, 400);
@@ -62,15 +63,19 @@ militaryRoutes.post('/recall', requireSession, async (c) => {
   const next = { ...state, marches: result.value.marches };
   await persistWorld(c.env.DB, state, next, [], Date.now());
 
-  return c.json({ marches: result.value.marches });
+  // finding #15:原本直接回傳整個 marches 陣列(含所有其他國家的行軍,精確 size 外洩)。
+  // 改走 toPublicWorldView 投影——viewer 為 nation.id,只有自己涉入(attacker/defender)的
+  // 行軍才拿得到精確 size,其餘一律級距化。
+  const view = toPublicWorldView(next, nation.id);
+  return c.json({ marches: view.marches });
 });
 
 // POST /api/military/train — M8 補遺(PRD user story 25):玩家練兵,原本 applyTrain 只有
 // NPC 走。驗證/扣資源/army.size 累加與人口徵兵上限皆委由 applyTrain(見 game/actions.ts)。
 militaryRoutes.post('/train', requireSession, async (c) => {
   const { user } = c.get('session');
-  const body = await c.req.json<{ size?: number }>().catch(() => ({}) as never);
-  if (typeof body.size !== 'number') return c.json({ error: 'INVALID_BODY' }, 400);
+  const body = await parseJsonBody<{ size?: number }>(c.req);
+  if (!body || typeof body.size !== 'number') return c.json({ error: 'INVALID_BODY' }, 400);
 
   const world = await loadActiveWorld(c.env.DB);
   if (!world) return c.json({ error: 'NO_ACTIVE_SEASON' }, 400);
