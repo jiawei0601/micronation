@@ -592,11 +592,13 @@ export async function cleanupVerificationTokensKeepingLatest(
   await runOne(
     db
       .prepare(
+        // 七審 minor:keepTokenHash 是「額外保護」,子查詢改保留其餘 delivered 的 keepMax-1 筆
+        // 並排除 keepTokenHash 自身,否則舊 pending 完成寄送後可能出現 keepMax+1 筆 delivered。
         `DELETE FROM verification_tokens WHERE user_id = ? AND token_hash != ? AND delivered_at IS NOT NULL AND token_hash NOT IN (
-           SELECT token_hash FROM verification_tokens WHERE user_id = ? AND delivered_at IS NOT NULL ORDER BY seq DESC LIMIT ?
+           SELECT token_hash FROM verification_tokens WHERE user_id = ? AND delivered_at IS NOT NULL AND token_hash != ? ORDER BY seq DESC LIMIT ?
          )`
       )
-      .bind(userId, keepTokenHash, userId, keepMax),
+      .bind(userId, keepTokenHash, userId, keepTokenHash, Math.max(0, keepMax - 1)),
     `cleanupVerificationTokensKeepingLatest user=${userId}`
   );
 }

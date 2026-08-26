@@ -83,3 +83,36 @@ describe('Codex 六審 — 併發 resend 競態:pending token 不會被其他並
     expect(await findVerificationToken(db, orphanHash)).toBeNull();
   });
 });
+
+describe('Codex 七審 minor — 舊 pending 完成寄送後 delivered 總數仍不超過 keepMax', () => {
+  it('A(舊 pending)在 5 筆較新 delivered 之後才 mark delivered+cleanup:delivered 恰為 keepMax 筆且 A 保留', async () => {
+    const db = createTestD1();
+    await db
+      .prepare(
+        'INSERT INTO users (id, email, password_hash, password_salt, password_iterations, verified, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      )
+      .bind('user-cap', 'cap@example.com', 'h', 's', 1, 0, 0)
+      .run();
+
+    const tokenA = await sha256Hex('tok-A-late');
+    await insertVerificationTokenAtomic(db, { token_hash: tokenA, user_id: 'user-cap', expires_at: 999_999, created_at: 0 }, 0);
+
+    for (let i = 1; i <= VERIFICATION_TOKEN_KEEP_MAX; i++) {
+      const hash = `tok-newer-${i}`;
+      await insertVerificationTokenAtomic(db, { token_hash: hash, user_id: 'user-cap', expires_at: 999_999, created_at: i }, i);
+      await markVerificationTokenDelivered(db, hash, i);
+      await cleanupVerificationTokensKeepingLatest(db, 'user-cap', hash);
+    }
+
+    // A 的信終於寄成功:標記 delivered 並 cleanup(修復前這裡會留下 keepMax+1 筆 delivered)。
+    await markVerificationTokenDelivered(db, tokenA, 100);
+    await cleanupVerificationTokensKeepingLatest(db, 'user-cap', tokenA);
+
+    const rows = await db
+      .prepare('SELECT token_hash FROM verification_tokens WHERE user_id = ? AND delivered_at IS NOT NULL')
+      .bind('user-cap')
+      .all();
+    expect(rows.results.length).toBe(VERIFICATION_TOKEN_KEEP_MAX);
+    expect(rows.results.some((r: any) => r.token_hash === tokenA)).toBe(true);
+  });
+});
