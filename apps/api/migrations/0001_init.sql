@@ -69,12 +69,21 @@ CREATE UNIQUE INDEX idx_users_email ON users(email);
 -- token_hash 降為 UNIQUE(而非 PRIMARY KEY)——resend/cleanup 需要一個「插入序」穩定鍵排序
 -- 保留最新 N 筆,created_at(epoch ms)在同一毫秒內對同一 user 連續 resend 時可能重複,無法
 -- 單獨當穩定排序鍵;seq 是單調遞增、不重複的插入序,不受時鐘精度影響。
+-- Codex 六審(併發 resend 競態):插入時一律是 pending(delivered_at IS NULL)。寄信成功後才
+-- 原子標記 delivered_at——cap cleanup(cleanupVerificationTokensKeepingLatest)只對已標記
+-- delivered 的列生效,永遠不刪 pending 列。避免情境:A 插入 token 但寄信延遲(仍是 pending),
+-- 這段等待期間另外 5 次 resend 相繼寄信成功並各自觸發 cap cleanup——若 cleanup 不分 pending/
+-- delivered 一律以 seq 排序砍到剩最新 5 筆,A 那筆雖然還沒寄達使用者手上、也還沒被判定為
+-- 「有效退路」,卻會因為 seq 較舊而被排進淘汰名單,提前消失,A 最終收到的信裡的 token 已不存在
+-- 於表中。改成只對 delivered 列計數與淘汰後,pending 列在被自己的寄信結果(成功→delivered,
+-- 失敗→deleteVerificationTokenByHash 自行刪除)處理完之前,不會被任何其他並發呼叫觸碰。
 CREATE TABLE verification_tokens (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   token_hash TEXT NOT NULL UNIQUE,   -- SHA-256(token),不落地明文
   user_id TEXT NOT NULL REFERENCES users(id),
   expires_at INTEGER NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  delivered_at INTEGER              -- NULL = 寄信尚未確認成功(pending);非 NULL = 已確認寄達
 );
 CREATE INDEX idx_verification_tokens_user ON verification_tokens(user_id);
 -- Codex 五審③:cleanupExpiredVerificationTokens(全表 WHERE expires_at <= ?)與

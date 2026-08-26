@@ -7,6 +7,7 @@ import {
   insertUserWithVerificationToken,
   finalizeEmailVerification,
   insertVerificationTokenAtomic,
+  markVerificationTokenDelivered,
   cleanupVerificationTokensKeepingLatest,
   deleteVerificationTokenByHash,
   findVerificationToken,
@@ -139,9 +140,14 @@ export async function resendVerification(
   }
 
   if (mailSent) {
-    // 信確定寄達,這次的新 token 是「有效退路」——現在才安全做 cap cleanup(保留最新 5 筆,
-    // 明確排除這次剛寄出的 token,見函式註解)。resend 是使用者能重複觸發最多次的路徑,沒有
-    // 這道清理會讓 verification_tokens 對這個 user 無限增長。
+    // Codex 六審(併發 resend 競態):信確定寄達,先原子標記這次的 token 為 delivered,再做 cap
+    // cleanup(保留最新 5 筆「已 delivered」的、明確排除這次剛寄出的 token,見函式註解)。
+    // cleanupVerificationTokensKeepingLatest 現在只對 delivered_at IS NOT NULL 的列計數與
+    // 淘汰——任何其他並發 resend 呼叫此刻仍在等待寄信結果的 pending token(尚未標記
+    // delivered)天生不在候選範圍內,不會被這裡誤刪,即使它的 seq 比這次插入的還舊。
+    // resend 是使用者能重複觸發最多次的路徑,沒有這道清理會讓 verification_tokens 對這個
+    // user 無限增長。
+    await markVerificationTokenDelivered(db, verifyTokenHash, now);
     await cleanupVerificationTokensKeepingLatest(db, user.id, verifyTokenHash);
   } else {
     // 信沒寄出去,這次插入的 token 使用者永遠拿不到、也不該佔用 keepMax 名額或誤導使用者以

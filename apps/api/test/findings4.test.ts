@@ -12,6 +12,7 @@ import {
   getEventsSince,
   insertUserWithVerificationToken,
   insertVerificationTokenAtomic,
+  markVerificationTokenDelivered,
   cleanupVerificationTokensKeepingLatest,
   deleteVerificationTokenByHash,
   finalizeEmailVerification,
@@ -190,7 +191,9 @@ describe('③ — verification_tokens 插入(清過期)+ 寄信成功後才 cap 
     for (let i = 0; i < VERIFICATION_TOKEN_KEEP_MAX + 3; i++) {
       lastHash = `tok-${i}`;
       await insertVerificationTokenAtomic(db, { token_hash: lastHash, user_id: 'user-cap', expires_at: 999_999, created_at: i }, i);
-      // 比照 resendVerification 實際呼叫順序:每次插入後(模擬寄信成功)立刻做 cap cleanup。
+      // 比照 resendVerification 實際呼叫順序:每次插入後(模擬寄信成功)先標記 delivered,再做
+      // cap cleanup(六審:cleanup 只對 delivered 列生效)。
+      await markVerificationTokenDelivered(db, lastHash, i);
       await cleanupVerificationTokensKeepingLatest(db, 'user-cap', lastHash);
     }
 
@@ -245,6 +248,7 @@ describe('③ — verification_tokens 插入(清過期)+ 寄信成功後才 cap 
     const hashes = ['c-tok-0', 'c-tok-1', 'c-tok-2'];
     for (let i = 0; i < hashes.length; i++) {
       await insertVerificationTokenAtomic(db, { token_hash: hashes[i], user_id: 'user-chain', expires_at: 999_999, created_at: i }, i);
+      await markVerificationTokenDelivered(db, hashes[i], i);
       await cleanupVerificationTokensKeepingLatest(db, 'user-chain', hashes[i]);
     }
 

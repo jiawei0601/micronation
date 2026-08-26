@@ -527,6 +527,7 @@ export interface VerificationTokenRow {
   user_id: string;
   expires_at: number;
   created_at: number;
+  delivered_at?: number | null;
 }
 
 function insertVerificationTokenStmt(db: D1Database, row: VerificationTokenRow): D1PreparedStatement {
@@ -561,11 +562,27 @@ export async function insertVerificationTokenAtomic(db: D1Database, row: Verific
   ]);
 }
 
-/** 寄信成功後才呼叫——保留該 user 最新 keepMax 筆,排序鍵用 seq(AUTOINCREMENT 插入序,單調
- * 遞增不重複),不用 created_at(同一 user 連續 resend 可能落在同一毫秒,無法單獨當穩定排序
- * 鍵)。keepTokenHash(本次剛寄出、寄信已成功的 token)額外用 `token_hash != ?` 明確排除在
+/** Codex 六審:寄信成功後、做 cap cleanup 之前呼叫——把這次的 token 從 pending 原子標記為
+ * delivered。單一 UPDATE 語句本身即原子(SQLite 單語句保證),不需要額外包 batch。標記之後
+ * 這筆 token 才會被 cleanupVerificationTokensKeepingLatest 的「最新 keepMax 筆」計數與淘汰
+ * 邏輯看見——標記之前(仍是 pending)對任何並發的 cleanup 呼叫完全不可見、不可能被誤刪。 */
+export async function markVerificationTokenDelivered(db: D1Database, tokenHash: string, now: number): Promise<void> {
+  await runOne(
+    db.prepare('UPDATE verification_tokens SET delivered_at = ? WHERE token_hash = ?').bind(now, tokenHash),
+    `markVerificationTokenDelivered hash=${tokenHash}`
+  );
+}
+
+/** 寄信成功、且已呼叫 markVerificationTokenDelivered 標記本次 token 為 delivered 之後才呼叫——
+ * 保留該 user 最新 keepMax 筆「已 delivered」的 token,排序鍵用 seq(AUTOINCREMENT 插入序,
+ * 單調遞增不重複),不用 created_at(同一 user 連續 resend 可能落在同一毫秒,無法單獨當穩定
+ * 排序鍵)。keepTokenHash(本次剛標記 delivered 的 token)額外用 `token_hash != ?` 明確排除在
  * 刪除範圍外——即使它基於某種理由不在「最新 keepMax 筆」之列(理論上不會,它是剛插入的
- * 最新一筆,但不依賴這個假設),這道清理也絕不會誤刪它。 */
+ * 最新一筆,但不依賴這個假設),這道清理也絕不會誤刪它。
+ * Codex 六審(併發 resend 競態):WHERE 條件明確加上 `delivered_at IS NOT NULL`——只計數、只
+ * 淘汰已確認寄達的列,任何仍在等待寄信結果的 pending 列(另一個並發 resend 呼叫剛插入、
+ * 尚未標記 delivered)天生不在這個 DELETE 的候選範圍內,不論它的 seq 有多舊都不會被這裡
+ * 誤刪。 */
 export async function cleanupVerificationTokensKeepingLatest(
   db: D1Database,
   userId: string,
@@ -575,8 +592,8 @@ export async function cleanupVerificationTokensKeepingLatest(
   await runOne(
     db
       .prepare(
-        `DELETE FROM verification_tokens WHERE user_id = ? AND token_hash != ? AND token_hash NOT IN (
-           SELECT token_hash FROM verification_tokens WHERE user_id = ? ORDER BY seq DESC LIMIT ?
+        `DELETE FROM verification_tokens WHERE user_id = ? AND token_hash != ? AND delivered_at IS NOT NULL AND token_hash NOT IN (
+           SELECT token_hash FROM verification_tokens WHERE user_id = ? AND delivered_at IS NOT NULL ORDER BY seq DESC LIMIT ?
          )`
       )
       .bind(userId, keepTokenHash, userId, keepMax),
@@ -593,6 +610,9 @@ export async function deleteVerificationTokenByHash(db: D1Database, tokenHash: s
   );
 }
 
+/** Codex 六審:不依 delivered_at 篩選——pending(信已寄出但 markVerificationTokenDelivered
+ * 尚未落地的窗口期)與 delivered 兩種狀態的 token 都必須能被查到、通過 verifyEmail。使用者
+ * 拿到信、點了連結,不該因為伺服器端「標記 delivered」這個記帳動作還沒跑完就被拒絕。 */
 export async function findVerificationToken(db: D1Database, tokenHash: string): Promise<VerificationTokenRow | null> {
   return db.prepare('SELECT * FROM verification_tokens WHERE token_hash = ?').bind(tokenHash).first<VerificationTokenRow>();
 }
