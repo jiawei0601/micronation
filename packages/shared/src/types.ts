@@ -209,29 +209,51 @@ export interface PublicNation {
   readonly policies: Readonly<Policies>;
 }
 
-/**
- * March 的受限投影(finding #15)——只有出征雙方(viewer 為 attackerId 或 defenderId)
- * 才看得到精確 size,其餘 viewer 只拿到概略級距 sizeTier,不洩漏他國精確兵力。
- */
-export interface PublicMarch {
+interface PublicMarchBase {
   readonly id: Id;
   readonly attackerId: Id;
   readonly defenderId: Id;
   readonly departedAt: Tick;
   readonly arrivesAt: Tick;
-  /** 僅 viewer 為 attacker/defender 時提供 */
-  readonly size?: number;
-  /** viewer 非當事方時提供,取代精確 size */
-  readonly sizeTier?: ArmySizeTier;
 }
+
+/**
+ * March 的受限投影(finding #15)——只有出征雙方(viewer 為 attackerId 或 defenderId)
+ * 才看得到精確 size,其餘 viewer 只拿到概略級距 sizeTier,不洩漏他國精確兵力。
+ * 用 union 強制兩者互斥(三審 finding #2/#5)——舊版把 size?/sizeTier? 都設成 optional,
+ * 型別上allow「兩者同時有值」或「兩者都缺」這種語意錯誤的狀態,編譯器攔不住;
+ * 改成 union 後,取得 size 的分支型別上就不可能同時帶 sizeTier,反之亦然。
+ */
+export type PublicMarch = PublicMarchBase &
+  (
+    | { readonly size: number; readonly sizeTier?: never }
+    | { readonly size?: never; readonly sizeTier: ArmySizeTier }
+  );
+
+/**
+ * Region 的唯讀投影(三審 finding #6)——`Readonly<Region>` 只讓頂層欄位唯讀,
+ * `bonuses` 本身仍是可變的 `Partial<Record<ResourceKind, number>>` 物件,呼叫端拿到
+ * view 後仍可 `view.regions[0].bonuses.food = 999` 改到投影內部;巢狀欄位需另外標記唯讀。
+ */
+export type PublicRegion = Readonly<Omit<Region, 'bonuses'>> & {
+  readonly bonuses: Readonly<Partial<Record<ResourceKind, number>>>;
+};
+
+/**
+ * Treaty 的唯讀投影(三審 finding #6)——同上,`terms` 是巢狀可變物件,`Readonly<Treaty>`
+ * 頂層唯讀擋不住 `view.treaties[0].terms.duration = 0` 這類改動。
+ */
+export type PublicTreaty = Readonly<Omit<Treaty, 'terms'>> & {
+  readonly terms: Readonly<TreatyTerms>;
+};
 
 export interface PublicWorldView {
   readonly seasonId: Id;
   readonly tick: Tick;
-  readonly regions: readonly Readonly<Region>[];
+  readonly regions: readonly PublicRegion[];
   readonly nations: readonly PublicNation[];
   readonly marches: readonly PublicMarch[];
-  readonly treaties: readonly Readonly<Treaty>[];
+  readonly treaties: readonly PublicTreaty[];
   readonly orders: readonly Readonly<MarketOrder>[];
 }
 

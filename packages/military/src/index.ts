@@ -99,6 +99,13 @@ export function declareAttack(
     return err('INVALID_MARCH_SEQ');
   }
   const seq = stateView.nextMarchSeq;
+  // seq+1 本身也須落在安全整數範圍內(三審 finding #4)——seq === MAX_SAFE_INTEGER 時
+  // seq+1 會溢位成不精確值,回傳的 nextMarchSeq 存回 WorldState 後會產生垃圾序號,
+  // 之後所有 march id 都可能撞號。先算好再驗證,不安全就直接拒絕本次宣戰。
+  const nextSeq = seq + 1;
+  if (!Number.isSafeInteger(nextSeq)) {
+    return err('INVALID_MARCH_SEQ');
+  }
   const march: March = {
     id: makeId('march', attackerId, defenderId, tick, seq),
     attackerId,
@@ -108,7 +115,7 @@ export function declareAttack(
     arrivesAt,
   };
 
-  return ok({ march, nextMarchSeq: seq + 1 });
+  return ok({ march, nextMarchSeq: nextSeq });
 }
 
 export function regionDistance(a: number, b: number): number {

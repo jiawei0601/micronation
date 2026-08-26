@@ -37,6 +37,11 @@ interface Nation {
 interface ScoreBreakdown { economy: number; warfare: number; tech: number; diplomacy: number; total: number; }
 interface FlagSpec { layout: string; colors: string[]; emblem: string; }
 interface Region { id: Id; name: string; bonuses: Partial<Record<ResourceKind, number>>; } // ±百分比
+// PublicRegion/PublicTreaty(三審 finding #6):PublicWorldView 內的巢狀可變欄位(Region.bonuses、
+// Treaty.terms)須額外標記深層 readonly——`Readonly<Region>`/`Readonly<Treaty>` 只讓頂層唯讀,
+// bonuses/terms 本身仍是可變物件、擋不住 view.regions[0].bonuses.food = 999 這類改動。
+// type PublicRegion = Readonly<Omit<Region,'bonuses'>> & { readonly bonuses: Readonly<Partial<Record<ResourceKind,number>>> };
+// type PublicTreaty = Readonly<Omit<Treaty,'terms'>> & { readonly terms: Readonly<TreatyTerms> };
 interface WorldState {
   seasonId: Id; tick: Tick;
   regions: Region[]; nations: Nation[];
@@ -61,14 +66,14 @@ interface PublicNation {
 // PublicMarch — March 的受限投影(第二輪 finding #15)。只有出征雙方(viewer 為 attackerId
 // 或 defenderId)才拿得到精確 size,其餘 viewer(含 null/匿名)只拿到概略級距 sizeTier,
 // 不洩漏他國精確兵力(呼應 PublicNation.armySizeTier 的同一原則)。
-interface PublicMarch {
-  id: Id; attackerId: Id; defenderId: Id; departedAt: Tick; arrivesAt: Tick;
-  size?: number;       // 僅 viewer 為 attacker/defender 時提供
-  sizeTier?: ArmySizeTier; // viewer 非當事方時提供,取代精確 size
-}
+// PublicMarch 用 union 強制 size/sizeTier 互斥(三審 finding #2/#5)——舊版兩者皆 optional,
+// 型別上允許「兩者同時有值」或「兩者都缺」這種語意錯誤狀態,編譯器攔不住。
+type PublicMarch = { id: Id; attackerId: Id; defenderId: Id; departedAt: Tick; arrivesAt: Tick } &
+  ( { size: number; sizeTier?: never }        // 僅 viewer 為 attacker/defender 時提供
+  | { size?: never; sizeTier: ArmySizeTier } ); // viewer 非當事方時提供,取代精確 size
 interface PublicWorldView {
-  seasonId: Id; tick: Tick; regions: Region[]; nations: PublicNation[];
-  marches: PublicMarch[]; treaties: Treaty[]; orders: MarketOrder[];
+  seasonId: Id; tick: Tick; regions: PublicRegion[]; nations: PublicNation[];
+  marches: PublicMarch[]; treaties: PublicTreaty[]; orders: MarketOrder[];
 }
 ```
 - `toPublicWorldView` 的每一層輸出皆為深拷貝(flag/colors/score/reputation/policies/region
@@ -112,8 +117,9 @@ cancelOrder(book, orderId, nationId): Result<{book}>
 //   直接跳過該筆(不成交,兩邊都留在 book),不是 Err(finding #11)。
 // isPositiveInteger 用 Number.isSafeInteger(不是 Number.isInteger)(finding #12)。
 // id 一律走 shared.makeId(prefix, ...parts) 純字串組合,不可用 Date.now/crypto
-// 撮合候選(isMatch)須同時驗證 resting order 的 qty/price 為正安全整數,book 中若混入損壞資料
-// 直接視為不可撮合對象跳過,不炸整個請求(第二輪 finding #6)。
+// 撮合候選(isMatch)須同時驗證 resting order 的 qty/price 為正安全整數、side 須 ∈ {'buy','sell'},
+// book 中若混入損壞資料(含 side 非法值)直接視為不可撮合對象跳過,不炸整個請求
+// (第二輪 finding #6,side 檢查為三審 finding #3——非法 side 可能被 !== o.side 誤判為對邊)。
 // 成交前計算 notional = fillQty × tradePrice 與 tariff = round(notional × tariffRate),
 // 任一非 Number.isSafeInteger(即使 qty/price 個別皆安全整數、僅乘積溢位)一律 Err('UNSAFE_NOTIONAL')
 // (第二輪 finding #6/#9)。
@@ -145,8 +151,10 @@ propose/respond/breach/expire → 純狀態轉移函式,輸入 Treaty[]+動作,�
 //   respond(action='counter') 驗證的是「既有 terms 與 counterTerms 合併後」的結果(`{...terms, ...counterTerms}`),
 //   不是只驗 counterTerms 本身——否則「counter 把 duration 蓋成 undefined」這類案例會漏檢。
 // propose/respond/breach/expire 的 tick 參數須為非負安全整數,否則 Err('INVALID_TICK')(第二輪 finding #3)。
-// expire() 對每筆 active 條約額外要求 activatedAt/duration 皆為非負安全整數、且兩者相加不溢位安全整數
-//   範圍,否則同樣回 Err('CORRUPTED_TREATY')(第二輪 finding #3,擴充原本只查「缺值」的檢查)。
+// expire() 對每筆 active 條約額外要求 activatedAt 為非負安全整數、duration 為正安全整數(duration===0
+//   視為資料損壞,而非「立即到期」——propose/respond 的 validateTerms 本就要求 duration>0,三審 finding #1)、
+//   且兩者相加不溢位安全整數範圍,否則同樣回 Err('CORRUPTED_TREATY')(第二輪 finding #3,擴充原本只查
+//   「缺值」的檢查)。
 canAttack(treaties, attackerId, defenderId): { allowed: boolean; reason?: 'NAP'|'ALLIANCE' }
 breachPenalty(treaty): { compensation: number; reputationDelta: number }
 ```
@@ -173,7 +181,8 @@ declareAttack(state-view, attackerId, defenderId, army, tick): Result<{ march: M
 //   **不可**用 marches.filter(...).length 之類「現存筆數」推算(行軍抵達/撤回後筆數會下降,
 //   重新出征可能拿到用過的序號、和歷史 march id 撞號)(第二輪 finding #4/#8,取代原 finding #21 的做法)。
 //   declareAttack 回傳 { march, nextMarchSeq: seq + 1 },呼叫端(api 層)須把 nextMarchSeq 存回
-//   WorldState.nextMarchSeq,下次呼叫時帶入。
+//   WorldState.nextMarchSeq,下次呼叫時帶入。seq+1 本身也須驗證是安全整數(三審 finding #4)——
+//   nextMarchSeq === Number.MAX_SAFE_INTEGER 時 seq+1 會溢位成不精確值,直接 Err('INVALID_MARCH_SEQ')。
 regionDistance(a: Region 索引, b): number   // 距離表在 shared/constants
 ```
 抵達後的戰鬥由 engine 在 resolveTick 內解算——military 只管合法性與排程。

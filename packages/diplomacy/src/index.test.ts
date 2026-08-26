@@ -308,6 +308,13 @@ describe('propose/respond/breach/expire — tick 驗證(regression for Codex fin
     ];
     expect(expire(corrupted, 10)).toEqual({ ok: false, error: 'CORRUPTED_TREATY' });
   });
+
+  it('expire 對 duration 為 0 的損壞資料回 CORRUPTED_TREATY(regression for Codex 三審 finding #1——0 代表資料損壞而非「立即到期」)', () => {
+    const corrupted: Treaty[] = [
+      { id: 't1', kind: 'nap', aId: A, bId: B, status: 'active', terms: { duration: 0, activatedAt: 5 }, createdAt: 0 },
+    ];
+    expect(expire(corrupted, 10)).toEqual({ ok: false, error: 'CORRUPTED_TREATY' });
+  });
 });
 
 describe('canAttack', () => {

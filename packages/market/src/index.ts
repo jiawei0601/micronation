@@ -72,6 +72,8 @@ export function placeOrder(
 
   const isMatch = (resting: MarketOrder): boolean =>
     resting.kind === o.kind &&
+    (resting.side === 'buy' || resting.side === 'sell') && // resting.side 損壞資料防禦(三審 finding #3)——
+    // 非 'buy'/'sell' 的損壞值不得被 !== o.side 誤判為「對邊」而參與撮合
     resting.side !== o.side &&
     resting.nationId !== o.nationId && // 禁止自我對敲:同一國家的買賣單互相跳過,不成交
     // resting order 的 qty/price 使用前同驗(finding #6)——book 若含損壞資料(理論上不該發生,

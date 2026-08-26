@@ -299,6 +299,23 @@ describe('declareAttack', () => {
     const state = makeState([attacker, defender], { nextMarchSeq: -1 });
     expect(declareAttack(state, 'a', 'b', 10, 0)).toEqual({ ok: false, error: 'INVALID_MARCH_SEQ' });
   });
+
+  it('nextMarchSeq 為 Number.MAX_SAFE_INTEGER 時 seq+1 會溢位,拒絕宣戰(regression for Codex 三審 finding #4)', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'r0' });
+    const defender = makeNation({ id: 'b', regionId: 'r1' });
+    const state = makeState([attacker, defender], { nextMarchSeq: Number.MAX_SAFE_INTEGER });
+    expect(declareAttack(state, 'a', 'b', 10, 0)).toEqual({ ok: false, error: 'INVALID_MARCH_SEQ' });
+  });
+
+  it('nextMarchSeq 為 Number.MAX_SAFE_INTEGER - 1 時 seq+1 仍是安全整數,正常放行', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'r0' });
+    const defender = makeNation({ id: 'b', regionId: 'r1' });
+    const state = makeState([attacker, defender], { nextMarchSeq: Number.MAX_SAFE_INTEGER - 1 });
+    const r = declareAttack(state, 'a', 'b', 10, 0);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.nextMarchSeq).toBe(Number.MAX_SAFE_INTEGER);
+  });
 });
 
 describe('marchTime / regionDistance', () => {

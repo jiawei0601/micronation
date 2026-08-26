@@ -170,6 +170,16 @@ describe('placeOrder — 撮合前 safe-integer 驗證(regression for Codex find
     expect(r.value.trades).toHaveLength(1);
     expect(r.value.trades[0].sellOrderId).toBe('healthy');
   });
+
+  it('book 中混入 side 損壞(非 buy/sell)的 resting order 時,跳過該筆不撮合、不炸整個請求(regression for Codex 三審 finding #3)', () => {
+    const corrupted = restingOrder({ id: 'corrupted', side: 'bogus' as unknown as 'sell', qty: 5, price: 10 });
+    const healthy = restingOrder({ id: 'healthy', qty: 5, price: 10 });
+    const r = placeOrder([corrupted, healthy], newOrder({ qty: 5, price: 10 }), ref(), ctx(), NO_TARIFF, 0);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.trades).toHaveLength(1);
+    expect(r.value.trades[0].sellOrderId).toBe('healthy');
+  });
 });
 
 describe('placeOrder — id 唯一性(seq 避免撞號)', () => {

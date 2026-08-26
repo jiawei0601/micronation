@@ -3,6 +3,8 @@ import type {
   PublicWorldView,
   PublicNation,
   PublicMarch,
+  PublicRegion,
+  PublicTreaty,
   Nation,
   Region,
   Treaty,
@@ -48,11 +50,11 @@ function toPublicNation(n: Nation): PublicNation {
   };
 }
 
-function toPublicRegion(r: Region): Region {
+function toPublicRegion(r: Region): PublicRegion {
   return { id: r.id, name: r.name, bonuses: { ...r.bonuses } };
 }
 
-function toPublicTreaty(t: Treaty): Treaty {
+function toPublicTreaty(t: Treaty): PublicTreaty {
   return { ...t, terms: { ...t.terms } };
 }
 

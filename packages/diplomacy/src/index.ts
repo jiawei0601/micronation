@@ -206,8 +206,10 @@ export function expire(treaties: Treaty[], tick: Tick): Result<{ treaties: Treat
   if (!isValidTick(tick)) return err('INVALID_TICK');
 
   // 不變量:status === 'active' 的條約必有 terms.activatedAt(respond(accept) 必寫入),
-  // 且 activatedAt/duration 皆須是非負安全整數、兩者相加不可溢位安全整數範圍——否則到期時間
-  // 算出來會是垃圾值(finding #3)。任一被破壞,expire 整批回 Err,而非用 createdAt 猜測。
+  // 且 activatedAt 須為非負安全整數、duration 須為正安全整數(propose/respond 的 validateTerms
+  // 本就要求 duration>0,duration===0 代表資料損壞而非「立即到期」,第三輪 finding #1)、
+  // 兩者相加不可溢位安全整數範圍——否則到期時間算出來會是垃圾值(finding #3)。
+  // 任一被破壞,expire 整批回 Err,而非用 createdAt 猜測。
   for (const t of treaties) {
     if (t.status !== 'active') continue;
     const { activatedAt, duration } = t.terms;
@@ -215,7 +217,7 @@ export function expire(treaties: Treaty[], tick: Tick): Result<{ treaties: Treat
       !Number.isSafeInteger(activatedAt) ||
       (activatedAt as number) < 0 ||
       !Number.isSafeInteger(duration) ||
-      duration < 0 ||
+      duration <= 0 ||
       !Number.isSafeInteger((activatedAt as number) + duration)
     ) {
       return err('CORRUPTED_TREATY');
