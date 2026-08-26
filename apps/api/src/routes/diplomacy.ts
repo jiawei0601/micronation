@@ -119,20 +119,27 @@ diplomacyRoutes.post('/breach', requireSession, async (c) => {
   const receiverRoom =
     otherParty !== undefined ? Math.max(0, Number.MAX_SAFE_INTEGER - otherParty.resources.money) : actualCompensation;
   const safeCompensation = Math.min(actualCompensation, receiverRoom);
-  // ③-5:reputationDelta 由 shared breachPenalty() 實際算出並套用,不再是路由自己硬寫死的字面
-  // 常數——原本 `+ 1` 完全忽略 breachPenalty 回傳的 reputationDelta(只用了 compensation 那一半
-  // 的回傳值),等於這個欄位算了但沒人用。改成 `breaches += Math.abs(penalty.reputationDelta)`
-  // (breachPenalty 目前回傳固定 -10,語意是「這次毀約的信譽扣分幅度」,取絕對值疊加到只增不減
-  // 的 breaches 計數器上),且同樣 clamp 在安全整數範圍內。
-  const reputationIncrement = Math.abs(penalty.reputationDelta);
+  // Codex 四審⑦:breaches 的語意是「毀約次數」(公開信譽標記,呼應 CONTRACT §外交「毀約=賠償+
+  // 全服背信標記」),不是「累積信譽分數」——上一版用 `Math.abs(penalty.reputationDelta)`(固定
+  // 10)當每次的增量,一次毀約 breaches 就跳 10,「次數」計數器語意整個跑掉(前端顯示的
+  // 「毀約 N 次」會變成完全不對應實際次數的數字)。改回每次毀約固定 +1。breachPenalty() 回傳的
+  // reputationDelta 目前沒有實際的「信譽分數」欄位可對應套用,暫時保留在 shared 供未來若真的加上
+  // 信譽分數欄位時使用,這裡不消費它(未使用,非死碼——是預留給尚未存在的功能)。
   const nations = state.nations.map((n) => {
     if (n.id === nation.id) {
       return {
         ...n,
-        resources: { ...n.resources, money: n.resources.money - safeCompensation },
+        // Codex 四審⑧:付款方永遠扣全額 actualCompensation(他們真正付得起、也應該付的金額)——
+        // 不能用 safeCompensation(是「收款方為了不溢位所能接受的上限」,只影響對方入帳多少),
+        // 舊版誤用 safeCompensation 來扣付款方餘額,收款方接近 Number.MAX_SAFE_INTEGER 時
+        // safeCompensation < actualCompensation,付款方反而少付了差額——白白省下了本該付出的賠償。
+        // 付款方扣 actualCompensation、收款方只收 safeCompensation,兩者差額(actualCompensation -
+        // safeCompensation)視同系統回收(不轉給任何一方,理由:收款方帳戶已逼近安全整數上限,
+        // 硬塞更多金額會讓後續任何餘額運算失準,寧可讓這部分賠償金「蒸發」也不製造不精確的餘額)。
+        resources: { ...n.resources, money: n.resources.money - actualCompensation },
         reputation: {
           ...n.reputation,
-          breaches: Math.min(Number.MAX_SAFE_INTEGER, n.reputation.breaches + reputationIncrement),
+          breaches: Math.min(Number.MAX_SAFE_INTEGER, n.reputation.breaches + 1),
         },
       };
     }

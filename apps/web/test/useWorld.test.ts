@@ -312,6 +312,65 @@ describe('useWorld — 輪詢邏輯', () => {
     expect(sinceSeqSeen.at(-1)).toBe(0);
   });
 
+  it('resetWorld() clears loading even when called while a poll is still in-flight (Codex 四審⑫)', async () => {
+    // 修復前:resetWorld() 只 bump seqRef、不清 loading——若呼叫當下正好有一個 poll() 還在飛行中
+    // (loading=true),那個 poll() 的 finally 判斷 mySeq !== seqRef.current 而跳過
+    // setLoading(false),loading 永遠卡在 true。
+    let resolveFn: ((r: WorldResponse) => void) | null = null;
+    const fetcher: WorldFetcher = {
+      fetchWorld: vi.fn(
+        () =>
+          new Promise<WorldResponse>((resolve) => {
+            resolveFn = resolve;
+          })
+      ),
+    };
+    const { result } = renderHook(() => useWorld({ fetcher }));
+    await flushMicrotasks();
+    expect(result.current.loading).toBe(true); // 第一次 poll 還沒 resolve
+
+    act(() => result.current.resetWorld());
+    expect(result.current.loading).toBe(false); // 修復後:resetWorld 立刻清 loading
+
+    // 稍後那個被丟棄的舊 poll 真的 resolve 了,也不該讓 loading 又跳回奇怪的狀態。
+    await act(async () => {
+      resolveFn?.({ view: fakeWorld(1), nextTickAt: 0, events: [], nextCursor: null });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.loading).toBe(false);
+  });
+
+  it('resetAndRefresh() resets then immediately triggers a new fetch (Codex 四審⑫)', async () => {
+    let calls = 0;
+    const sinceSeqSeen: (number | undefined)[] = [];
+    const fetcher: WorldFetcher = {
+      fetchWorld: vi.fn(async ({ sinceSeq } = {}): Promise<WorldResponse> => {
+        calls += 1;
+        sinceSeqSeen.push(sinceSeq);
+        const ev = fakeEvent(calls);
+        return { view: fakeWorld(calls), nextTickAt: 0, events: [ev], nextCursor: ev.seq };
+      }),
+    };
+    const { result } = renderHook(() => useWorld({ fetcher }));
+    await flushMicrotasks();
+    expect(calls).toBe(1);
+    expect(result.current.events.length).toBe(1);
+
+    await act(async () => {
+      result.current.resetAndRefresh();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // 立刻多打了一次(不用等下一輪 45s 間隔),且游標已重置回 0 才發出這次請求。
+    expect(calls).toBe(2);
+    expect(sinceSeqSeen.at(-1)).toBe(0);
+    // 重置後只剩新的這一筆,不是累積成 2 筆。
+    expect(result.current.events.length).toBe(1);
+  });
+
   it('changing identityKey auto-resets and refetches, but not on initial mount', async () => {
     const sinceSeqSeen: (number | undefined)[] = [];
     const fetcher: WorldFetcher = {

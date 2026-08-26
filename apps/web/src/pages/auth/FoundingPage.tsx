@@ -14,7 +14,7 @@ const NATION_NAME_MAX = 20;
  *  regions(mock 與真 API 同介面),不再寫死;送出時帶 regionId 而非 index。 */
 export function FoundingPage() {
   const navigate = useNavigate();
-  const { world, resetWorld } = useWorldContext();
+  const { world, resetAndRefresh } = useWorldContext();
   const regions = world?.regions ?? [];
 
   const [nationName, setNationName] = useState('');
@@ -43,7 +43,8 @@ export function FoundingPage() {
       await foundFn.found({ name: trimmedName, flag: flagSpec, regionId: effectiveRegionId });
       // 跨帳號事件外洩修復:建國成功即清空舊 world/events/游標,避免沿用建國前(可能是
       // 另一個身分)累積的事件——即時保險,不等 identityKey 自動偵測。
-      resetWorld();
+      // Codex 四審⑫:改用 resetAndRefresh,建國後立刻補一次 poll(),不等最長 45s 的下一輪。
+      resetAndRefresh();
       navigate('/');
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : String(err));

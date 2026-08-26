@@ -4,11 +4,10 @@ import type { D1Database } from '../db/types';
 import {
   findUserByEmail,
   findUserById,
-  insertUser,
-  markUserVerified,
-  insertVerificationToken,
+  insertUserWithVerificationToken,
+  finalizeEmailVerification,
+  insertVerificationTokenWithCleanup,
   findVerificationToken,
-  deleteVerificationTokensForUser,
   insertSession,
   findSession,
   deleteSession,
@@ -59,28 +58,26 @@ export async function register(
   // finding #15:改靠 users.email 的 UNIQUE 約束擋重複,而非「先 SELECT 再 INSERT」——
   // 後者在兩個並發請求間有 TOCTOU 窗口,兩者都通過 SELECT 檢查後各自 INSERT,其中一個才會
   // 撞唯一鍵,但撞鍵之前的檢查等於白做,不能真正防止重複帳號。
+  // Codex 四審②:user INSERT + verification_token INSERT 併入同一 batch(insertUserWithVerification
+  // Token,見 db/repository.ts 註解)——舊版兩次獨立呼叫,中途失敗會留下「帳號建立成功、但沒有
+  // 任何 token,使用者也不知道要點 resend」的卡死半成品帳號。
   try {
-    await insertUser(db, row);
+    await insertUserWithVerificationToken(db, row, {
+      token_hash: verifyTokenHash,
+      user_id: userId,
+      expires_at: now + VERIFY_TOKEN_TTL_MS,
+      created_at: now,
+    });
   } catch (e) {
     // ①-5:只有撞到 idx_users_email(users.email 唯一鍵)才轉譯成 EMAIL_TAKEN——其他 unique
-    // 違規(理論上不該在 insertUser 這個單一 INSERT 發生,但保守起見不要一律吞成 EMAIL_TAKEN)
-    // 原樣往上拋,讓 index.ts onError 走 500,不要用一個語意不符的 400 錯誤蓋過去。
+    // 違規(理論上不該在這個 batch 發生,但保守起見不要一律吞成 EMAIL_TAKEN)原樣往上拋,讓
+    // index.ts onError 走 500,不要用一個語意不符的 400 錯誤蓋過去。
     if (isUniqueConstraintErrorOn(e, 'users.email')) return err('EMAIL_TAKEN');
     throw e;
   }
 
-  // ③-1:verification_tokens 是多列表(見 db/repository.ts 註解)——插入一列新 token 不會覆寫
-  // 或刪除任何既有列,所以「先寫 token、才寄信」與「先寄信、才寫 token」不再有並發覆蓋的風險
-  // 差異(不像原本 users.verify_token 單欄位那樣覆寫即代表舊 token 失效)。這裡先寫入 token
-  // 列,再嘗試寄信——寄信失敗不影響已寫入的 token(finding #16:使用者已經寫入 DB,之後可用
-  // /api/auth/resend 補寄;那次 resend 會再新增一列,兩列都合法有效)。
-  await insertVerificationToken(db, {
-    token_hash: verifyTokenHash,
-    user_id: userId,
-    expires_at: now + VERIFY_TOKEN_TTL_MS,
-    created_at: now,
-  });
-
+  // finding #16:寄信失敗不影響已寫入的 token(使用者已經寫入 DB,之後可用 /api/auth/resend
+  // 補寄;那次 resend 會再新增一列,兩列都合法有效)。
   let mailSent = true;
   try {
     await mail.sendVerificationEmail(normalized, verifyToken);
@@ -111,12 +108,15 @@ export async function resendVerification(
   const verifyToken = randomHex(16);
   const verifyTokenHash = await sha256Hex(verifyToken);
 
-  await insertVerificationToken(db, {
+  // Codex 四審③:插入時同一 batch 清理該 user 過期/超量的舊 token(見 db/repository.ts
+  // insertVerificationTokenWithCleanup 註解)——resend 是使用者能重複觸發最多次的路徑,
+  // 沒有這道清理,持續狂點 resend 會讓 verification_tokens 對這個 user 無限增長。
+  await insertVerificationTokenWithCleanup(db, {
     token_hash: verifyTokenHash,
     user_id: user.id,
     expires_at: now + VERIFY_TOKEN_TTL_MS,
     created_at: now,
-  });
+  }, now);
 
   let mailSent = true;
   try {
@@ -189,8 +189,9 @@ export async function verifyEmail(db: D1Database, token: string, now: number): P
   // ①-4:過期判斷改用 <=,呼應 resolveSession 已有的同一原則(finding #20)——expires_at===now
   // 這個邊界時刻視為已過期,不因為「剛好卡在那一毫秒」而放行。
   if (tokenRow.expires_at <= now) return err('TOKEN_EXPIRED');
-  await markUserVerified(db, tokenRow.user_id);
-  await deleteVerificationTokensForUser(db, tokenRow.user_id);
+  // Codex 四審④:「標記已驗證」+「清空該 user 所有 verification_tokens」併入同一 batch
+  // (finalizeEmailVerification,見 db/repository.ts 註解)——避免兩次獨立呼叫之間的不一致窗口。
+  await finalizeEmailVerification(db, tokenRow.user_id);
   return ok({ userId: tokenRow.user_id });
 }
 

@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Link, NavLink, Navigate, Outlet, useNavigate } from 'react-router-dom';
 import { Flag } from '../../components/flag/Flag';
 import { useWorldContext } from '../../api/WorldProvider';
@@ -23,15 +24,27 @@ export function PanelLayout() {
   const navigate = useNavigate();
   const { world, unseenCount, markEventsSeen, resetWorld } = useWorldContext();
   const { nation, status: nationStatus, error: nationError, refresh: refreshNation } = useNation();
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
 
+  // Codex 四審⑪:只有 authFn.logout() 真正成功,才清空本地 world 狀態並導去 /login——舊版用
+  // try/finally,不論成功或失敗都執行 resetWorld()+navigate,等於「後端登出失敗(例如網路中斷、
+  // 伺服器 500)時,前端還是宣稱已登出、把使用者導去登入頁」——但伺服器那邊的 session 可能仍然
+  // 有效(cookie 沒被清掉),使用者以為自己登出了,實際上這個裝置上這個帳號仍是登入狀態,是
+  // 誤導性的安全假象。失敗時改成顯示錯誤訊息+提供重試按鈕,不清 world、不導頁,不宣稱已登出。
   async function handleLogout() {
+    setLoggingOut(true);
+    setLogoutError(null);
     try {
       await authFn.logout();
-    } finally {
-      // 跨帳號事件外洩修復:無論後端登出成功與否,前端都要清空本地累積的
-      // world/events/游標,避免下一位使用同一裝置登入的人看到殘留事件。
+      // 跨帳號事件外洩修復:登出成功後清空本地累積的 world/events/游標,避免下一位使用
+      // 同一裝置登入的人看到殘留事件。
       resetWorld();
       navigate('/login');
+    } catch (err) {
+      setLogoutError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoggingOut(false);
     }
   }
 
@@ -91,13 +104,23 @@ export function PanelLayout() {
             </NavLink>
           ))}
         </div>
-        <button
-          type="button"
-          onClick={handleLogout}
-          className="mt-auto px-4 py-2 text-left text-sm text-[#9aa4b5] hover:text-white"
-        >
-          {t.auth.logout}
-        </button>
+        {logoutError ? (
+          <div className="mt-auto px-4 py-2 text-xs text-[#ff8f88]">
+            <p className="mb-1">{t.common.error}: {logoutError}</p>
+            <button type="button" onClick={handleLogout} disabled={loggingOut} className="underline disabled:opacity-50">
+              {t.common.retry}
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={handleLogout}
+            disabled={loggingOut}
+            className="mt-auto px-4 py-2 text-left text-sm text-[#9aa4b5] hover:text-white disabled:opacity-50"
+          >
+            {loggingOut ? t.common.loading : t.auth.logout}
+          </button>
+        )}
       </nav>
       <main className="flex-1 px-6 py-5 pb-24">
         <div className="mb-4 flex items-center gap-3">

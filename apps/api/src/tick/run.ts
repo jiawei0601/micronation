@@ -30,6 +30,7 @@ import {
   releaseTickLease,
   claimTickSlot,
   finalizeSeasonStmts,
+  cleanupExpiredVerificationTokens,
   TICK_RUNNING_STALE_MS,
   type HallOfFameEntry,
 } from '../db/repository';
@@ -141,6 +142,17 @@ export async function runTick(db: D1Database, opts: RunTickOptions): Promise<Run
   const seasonId = await getActiveSeasonId(db);
   if (!seasonId) return { ranTick: false, skippedReason: 'NO_ACTIVE_SEASON' };
 
+  // Codex 四審③(補):tick 路徑順手做一次全域 verification_tokens 過期清理——與
+  // insertVerificationTokenWithCleanup(僅在該 user 又插入新 token 時觸發)互補,涵蓋「user
+  // 從未 resend、token 自然過期後永遠沒有下一次插入觸發清理」的情況。與 season/tick lease
+  // 完全無關(verification_tokens 不屬於任何 season),獨立包 try/catch——這裡失敗不該讓整個
+  // tick 中斷,下一次 tick(一小時後)重試即可。
+  try {
+    await cleanupExpiredVerificationTokens(db, opts.now);
+  } catch (e) {
+    console.error('[tick] cleanupExpiredVerificationTokens failed (non-fatal)', e);
+  }
+
   // ③-5:順序改成「先搶 tick lease,成功後才認領時槽」——原本先 claimTickSlot 再 claimTickLease
   // 時,若這次觸發搶到了時槽(標記「這個時槽已處理」)、但緊接著搶 lease 失敗(另一個 runTick
   // 呼叫,例如人工觸發與 cron 幾乎同時)返回 TICK_IN_PROGRESS,這個時槽已經被標記處理過、但
@@ -155,17 +167,19 @@ export async function runTick(db: D1Database, opts: RunTickOptions): Promise<Run
     return { ranTick: false, seasonId, skippedReason: 'TICK_IN_PROGRESS' };
   }
 
-  if (opts.scheduledSlot !== undefined) {
-    const claimed = await claimTickSlot(db, seasonId, opts.scheduledSlot);
-    if (!claimed) {
-      // ③-5:時槽已被處理過——這次呼叫不會真正跑 tick,把剛搶到的 lease 讓出來,不留給
-      // finally 塊(finally 只在進入 try 之後才會執行,這裡尚未進入 try)。
-      await releaseTickLease(db, seasonId, ownerId);
-      return { ranTick: false, seasonId, skippedReason: 'ALREADY_PROCESSED_SLOT' };
-    }
-  }
-
   try {
+    // Codex 四審⑨:claimTickSlot 移進 try 區塊——舊版放在 try 外面,若 claimTickSlot 本身拋例外
+    // (例如 D1 連線中斷),finally 還沒掛上就已經拋出,剛搶到的 tick lease(claimTickLease 那步)
+    // 永遠不會被釋放,卡死整個賽季的後續 tick(要等 TICK_RUNNING_STALE_MS 才會被下一次觸發接管)。
+    // 移進 try 之後,不論 claimTickSlot 本身是正常回傳 false、或中途拋例外,唯一的 finally
+    // 都會執行 releaseTickLease,不再需要在「時槽已處理過」分支手動額外呼叫一次。
+    if (opts.scheduledSlot !== undefined) {
+      const claimed = await claimTickSlot(db, seasonId, opts.scheduledSlot);
+      if (!claimed) {
+        return { ranTick: false, seasonId, skippedReason: 'ALREADY_PROCESSED_SLOT' };
+      }
+    }
+
     // ③-1/③-8:state 與 prevVersion 出自同一次 season row 讀取,不再分開呼叫 getSeasonVersion。
     const loaded = await loadWorldStateVersioned(db, seasonId);
     if (!loaded) return { ranTick: false, seasonId, skippedReason: 'NO_ACTIVE_SEASON' };

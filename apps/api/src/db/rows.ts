@@ -21,6 +21,9 @@ import type {
   GameEvent,
 } from '@micronation/shared';
 import { EVENT, type EventType } from '@micronation/shared';
+// Codex 四審⑤:FlagSpec 驗證改共用 game/constants.ts 的 isValidFlagSpec——原本這裡自己另外
+// 定義一份寬鬆許多的 isFlagSpec(見下方刪除的舊定義註解),與 api 層的驗證規則不一致。
+import { isValidFlagSpec } from '../game/constants';
 
 /** rows.ts 專用錯誤——repository/routes 層對它 fail fast(500 附 table/rowId/field),
  * 不當一般 SyntaxError 吞掉繼續跑。 */
@@ -112,14 +115,6 @@ const isPolicyChangedAt = (v: unknown): boolean =>
     ([k, val]) => (POLICY_AXES as readonly string[]).includes(k) && typeof val === 'number' && Number.isFinite(val)
   );
 
-// ③-6:FlagSpec——layout/emblem 為字串、colors 為字串陣列。
-const isFlagSpec = (v: unknown): boolean =>
-  isPlainObject(v) &&
-  typeof v.layout === 'string' &&
-  typeof v.emblem === 'string' &&
-  Array.isArray(v.colors) &&
-  v.colors.every((c) => typeof c === 'string');
-
 // ③-6:Region.bonuses——鍵須為合法 ResourceKind、值須為有限數(±百分比)。
 const isBonuses = (v: unknown): boolean =>
   isPlainObject(v) &&
@@ -127,21 +122,34 @@ const isBonuses = (v: unknown): boolean =>
     ([k, val]) => (RESOURCE_KINDS as readonly string[]).includes(k) && typeof val === 'number' && Number.isFinite(val)
   );
 
-// ③-6:TreatyTerms——duration 必要且為有限數,其餘欄位若存在須符合各自型別/範圍。
-const isTreatyTerms = (v: unknown): boolean => {
+// Codex 四審⑥:TreatyTerms 驗證收緊——原本 duration/compensation/activatedAt 只檢查
+// Number.isFinite,放行負數、小數、極端浮點值(這三個欄位語意上都該是「安全整數」的 tick 數/
+// 金額,負的 duration 或帶小數的 compensation 都是壞資料該 fail fast 而非悄悄放行)。
+// pendingResponderId 原本只檢查 typeof === 'string',任意字串都放行——它的語意是「等待哪一方
+// 回應」,必須是這筆條約的 aId 或 bId 其中之一,不然下游 respond() 邏輯拿到一個誰都不是的
+// id,永遠等不到對得上的回應方。這裡需要呼叫端(rowToTreaty)傳入該筆條約的 aId/bId 當上下文。
+function isTreatyTerms(v: unknown, ctx: { aId: string; bId: string }): boolean {
   if (!isPlainObject(v)) return false;
-  if (typeof v.duration !== 'number' || !Number.isFinite(v.duration)) return false;
-  if (v.compensation !== undefined && (typeof v.compensation !== 'number' || !Number.isFinite(v.compensation))) return false;
+  if (typeof v.duration !== 'number' || !Number.isSafeInteger(v.duration) || v.duration <= 0) return false;
+  if (
+    v.compensation !== undefined &&
+    (typeof v.compensation !== 'number' || !Number.isSafeInteger(v.compensation) || v.compensation < 0)
+  )
+    return false;
   if (v.allianceDefense !== undefined && typeof v.allianceDefense !== 'boolean') return false;
   if (
     v.tariffDiscount !== undefined &&
     (typeof v.tariffDiscount !== 'number' || !Number.isFinite(v.tariffDiscount) || v.tariffDiscount < 0 || v.tariffDiscount > 1)
   )
     return false;
-  if (v.pendingResponderId !== undefined && typeof v.pendingResponderId !== 'string') return false;
-  if (v.activatedAt !== undefined && (typeof v.activatedAt !== 'number' || !Number.isFinite(v.activatedAt))) return false;
+  if (v.pendingResponderId !== undefined && v.pendingResponderId !== ctx.aId && v.pendingResponderId !== ctx.bId) return false;
+  if (
+    v.activatedAt !== undefined &&
+    (typeof v.activatedAt !== 'number' || !Number.isSafeInteger(v.activatedAt) || v.activatedAt < 0)
+  )
+    return false;
   return true;
-};
+}
 
 // ③-6:events.nation_ids——字串陣列。
 const isNationIds = (v: unknown): boolean => Array.isArray(v) && v.every((x) => typeof x === 'string');
@@ -233,7 +241,7 @@ export function rowToNation(r: NationRow): Nation {
     id: r.id,
     ownerId: r.owner_id,
     name: r.name,
-    flag: parseJsonShaped('nations', r.id, 'flag', r.flag, isFlagSpec),
+    flag: parseJsonShaped('nations', r.id, 'flag', r.flag, isValidFlagSpec),
     regionId: r.region_id,
     resources: {
       food: r.resource_food,
@@ -339,7 +347,7 @@ export function rowToTreaty(r: TreatyRow): Treaty {
     aId: r.a_id,
     bId: r.b_id,
     status: assertEnum('treaties', r.id, 'status', r.status, TREATY_STATUSES),
-    terms: parseJsonShaped('treaties', r.id, 'terms', r.terms, isTreatyTerms),
+    terms: parseJsonShaped('treaties', r.id, 'terms', r.terms, (v) => isTreatyTerms(v, { aId: r.a_id, bId: r.b_id })),
     createdAt: r.created_at,
   };
 }

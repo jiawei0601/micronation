@@ -90,9 +90,14 @@ export interface UseWorldResult {
   error: string | null;
   refresh: () => void;
   markEventsSeen: () => void;
-  /** 清空累積的 world/events/游標/已讀記錄,回到初始狀態(不含 loading/refetch)。
-   *  用於登入成功、登出、建國成功等「身分切換」時機,避免沿用前一個身分的事件(finding:跨帳號事件外洩)。 */
+  /** 清空累積的 world/events/游標/已讀記錄,回到初始狀態(含 loading——見下方 Codex 四審⑫
+   *  註解)。用於登出等「不需要立刻重拉」的身分切換時機,避免沿用前一個身分的事件
+   *  (finding:跨帳號事件外洩)。 */
   resetWorld: () => void;
+  /** Codex 四審⑫:resetWorld() 之後緊接著立刻 poll() 一次——用於登入成功、建國成功這類
+   *  「身分切換後應立刻顯示新身分世界狀態」的時機,不用等下一次輪詢間隔(最長 45s)。
+   *  登出不該用這個(登出後通常導頁離開,沒有下一個身分需要立刻拉),純用 resetWorld()。 */
+  resetAndRefresh: () => void;
 }
 
 export function useWorld(options: UseWorldOptions = {}): UseWorldResult {
@@ -181,7 +186,20 @@ export function useWorld(options: UseWorldOptions = {}): UseWorldResult {
     setEvents([]);
     setError(null);
     setSeenEventId(null);
+    // Codex 四審⑫:一併清 loading——resetWorld 呼叫時若剛好有一個 poll() 還在飛行中,上面的
+    // `seqRef.current += 1` 讓那個 poll() 的 finally 判斷 `mySeq === seqRef.current` 不成立,
+    // 不會執行 setLoading(false),loading 就此卡在 true、永遠不會自然清除(除非剛好有下一輪
+    // setInterval 的 poll() 覆蓋過去)——resetWorld 本身就代表「不再關心那個舊請求的結果」,
+    // 理應把 loading 一併歸零,不留下這個卡住的視覺狀態。
+    setLoading(false);
   }, []);
+
+  // Codex 四審⑫:resetWorld() + 立即 poll() 一次——供登入/建國成功時使用(見 UseWorldResult
+  // 型別註解)。
+  const resetAndRefresh = useCallback(() => {
+    resetWorld();
+    void poll();
+  }, [resetWorld, poll]);
 
   // identityKey 變化(例如換帳號登入、登出、建國成功後拿到新 nation id)時自動重置——
   // 不會在首次掛載時觸發(prevIdentityKeyRef 初始值就是當下的 identityKey)。
@@ -204,7 +222,7 @@ export function useWorld(options: UseWorldOptions = {}): UseWorldResult {
     return idx === -1 ? events.length : events.length - 1 - idx;
   }, [events, seenEventId]);
 
-  return { world, events, unseenCount, loading, error, refresh, markEventsSeen, resetWorld };
+  return { world, events, unseenCount, loading, error, refresh, markEventsSeen, resetWorld, resetAndRefresh };
 }
 
 export const mockViewerId = MOCK_VIEWER_ID;

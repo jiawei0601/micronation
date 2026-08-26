@@ -348,9 +348,10 @@ describe('finding #13 — diplomacy breach 實際結算賠償+信譽', () => {
 
     const aAfter = (await json<{ nation: { resources: { money: number }; reputation: { breaches: number } } }>(await app.request('/api/nation', { headers: { Cookie: a.cookie } }, env)))
       .nation;
-    // ③-5:breaches 改累加 breachPenalty().reputationDelta 的絕對值(目前固定 10),不再是路由
-    // 硬寫死的 +1——見 routes/diplomacy.ts breach handler 註解。
-    expect(aAfter.reputation.breaches).toBe(10);
+    // Codex 四審⑦:breaches 改回每次毀約固定 +1(語意是「毀約次數」,不是「累積信譽分數」)——
+    // ③-5 那版曾改成累加 breachPenalty().reputationDelta 的絕對值(固定 10),見
+    // routes/diplomacy.ts breach handler 註解,已回退。
+    expect(aAfter.reputation.breaches).toBe(1);
     expect(aAfter.resources.money).toBe(500 - 30);
 
     const bAfter = (await json<{ nation: { resources: { money: number } } }>(await app.request('/api/nation', { headers: { Cookie: b.cookie } }, env))).nation;

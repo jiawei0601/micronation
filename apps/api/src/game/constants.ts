@@ -24,6 +24,11 @@ export function isNameAllowed(name: string): boolean {
 // finding #8:原本 `{3,8}` 位十六進位字元含糊放行了 4/5/7/8 位這些 CSS/SVG 都不承認的怪異長度
 // (含 8 位帶 alpha 的 #RRGGBBAA 這種前端 <Flag> SVG 元件未必支援的格式)。收緊為僅 3 或 6 位,
 // 對應標準 CSS hex color(#RGB / #RRGGBB)。
+// Codex 四審⑤:唯一的 FlagSpec 驗證函式——db/rows.ts 原本另外維護一份 isFlagSpec,規則明顯更
+// 寬鬆(colors 不限數量/不驗 hex 格式、layout/emblem 無長度上限),兩處各自為政、允許的形狀不
+// 一致:手改 DB 或未來 migration bug 寫入的 flag,可能通得過 rows.ts 讀取時的驗證(不算
+// CorruptRowError),卻是這裡(api 層開國/改旗)永遠不會接受的形狀——同一個「合不合法」的問題
+// 有兩個答案。rows.ts 改為 import 這裡的函式,不再自己重複定義一份會走鐘的驗證邏輯。
 export function isValidFlagSpec(flag: unknown): flag is FlagSpec {
   if (!flag || typeof flag !== 'object') return false;
   const f = flag as Record<string, unknown>;

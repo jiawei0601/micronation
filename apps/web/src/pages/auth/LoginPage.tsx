@@ -6,7 +6,7 @@ import { useWorldContext } from '../../api/WorldProvider';
 
 export function LoginPage() {
   const navigate = useNavigate();
-  const { resetWorld } = useWorldContext();
+  const { resetAndRefresh } = useWorldContext();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -20,7 +20,9 @@ export function LoginPage() {
       await authFn.login(email, password);
       // 跨帳號事件外洩修復:登入成功即清空前一個身分殘留的 world/events/游標,
       // 不能等 identityKey 的自動偵測(晚一拍,且此時 nation 可能還沒 refetch)。
-      resetWorld();
+      // Codex 四審⑫:改用 resetAndRefresh——單純 resetWorld() 只清空、不重拉,登入後畫面會
+      // 空著等最長 45s 的下一輪輪詢才看得到世界狀態,resetAndRefresh 立刻補一次 poll()。
+      resetAndRefresh();
       navigate('/');
     } catch (err) {
       setError(authErrorMessage(err));

@@ -54,7 +54,18 @@ adminRoutes.post('/season', async (c) => {
   // 塞進 createSeason 之後才在別處因型別不符出錯(或更糟,悄悄存進 DB);npcCount 同理,原本
   // 「不合法就退回 DEFAULT_NPC_COUNT」讓呼叫端以為自己指定的數字生效了,實際上系統默默改用了
   // 別的數字,對呼叫端是難以察覺的行為落差。只有「完全沒帶該欄位」(undefined)才套用預設值。
-  if (body.name !== undefined && typeof body.name !== 'string') return c.json({ error: 'INVALID_BODY' }, 400);
+  // Codex 四審⑩:name 若「有帶」,trim 後須非空且長度上限 60——舊版只檢查 typeof === 'string',
+  // 純空白字串(`'   '`)或超長字串(例如貼了一整段文章)都會照樣存進 seasons.name,前端顯示
+  // 會出現空白標題或版面被撐爆的超長標題。上限 60 呼應 game/constants.ts NAME_MAX_BYTES 的
+  // 量級(國名 60 bytes),賽季名稱給寬鬆一點但仍是有限值,不是無上限。
+  const SEASON_NAME_MAX_LENGTH = 60;
+  let seasonName: string | undefined;
+  if (body.name !== undefined) {
+    if (typeof body.name !== 'string') return c.json({ error: 'INVALID_BODY' }, 400);
+    const trimmed = body.name.trim();
+    if (trimmed.length === 0 || trimmed.length > SEASON_NAME_MAX_LENGTH) return c.json({ error: 'INVALID_BODY' }, 400);
+    seasonName = trimmed;
+  }
 
   // ②-11:NPC 數量上限——generateNpcNations 依 npcCount 逐一產生 NPC 國家並各自分配 region/初始
   // 資源,沒有上限時一個惡意/手滑的超大 npcCount(例如打錯多打幾個 0)會在單一請求內產生海量
@@ -87,7 +98,7 @@ adminRoutes.post('/season', async (c) => {
   };
 
   try {
-    await createSeason(c.env.DB, body.name ?? `Season ${now}`, state, now);
+    await createSeason(c.env.DB, seasonName ?? `Season ${now}`, state, now);
   } catch (e) {
     // finding #10:in-memory 的 existing 檢查有 TOCTOU 窗口——並發請求都可能通過上面那次
     // getActiveSeasonId 檢查,真正的把關在 DB 唯一索引,這裡把它翻譯回同樣的 API 錯誤格式。

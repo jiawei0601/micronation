@@ -487,8 +487,11 @@ describe('Part2-4 — admin 開季 body:name 非字串 → 400,npcCount 不合�
   });
 });
 
-describe('Part2-5 — 毀約收款方溢位檢查 + reputationDelta 實際套用', () => {
-  it('reputation.breaches 累加 breachPenalty().reputationDelta 的絕對值(非硬寫死 +1）', async () => {
+describe('Part2-5 — 毀約收款方溢位檢查', () => {
+  // Codex 四審⑦:這個案例原本斷言 breaches 累加 breachPenalty().reputationDelta 的絕對值
+  // (固定 10)——已改回每次毀約固定 +1(語意是「毀約次數」,不是「累積信譽分數」),
+  // 見 routes/diplomacy.ts breach handler 與本檔 findings.test.ts 同案例的更新註解。
+  it('reputation.breaches 每次毀約固定 +1(不是 breachPenalty().reputationDelta 的絕對值）', async () => {
     const db = createTestD1();
     const env = { DB: db, ENVIRONMENT: 'test' };
     await createSeason(db, 'S', makeWorld({ seasonId: 'season-rep', tick: 200, regions: [makeRegion({ id: 'region-0' })] }), 0);
@@ -513,11 +516,8 @@ describe('Part2-5 — 毀約收款方溢位檢查 + reputationDelta 實際套用
       env
     );
 
-    const { breachPenalty } = await import('@micronation/diplomacy');
-    const expectedDelta = Math.abs(breachPenalty({ terms: { duration: 500, compensation: 10 } } as never).reputationDelta);
-
     const aAfter = (await json<{ nation: { reputation: { breaches: number } } }>(await app.request('/api/nation', { headers: { Cookie: a.cookie } }, env))).nation;
-    expect(aAfter.reputation.breaches).toBe(expectedDelta);
+    expect(aAfter.reputation.breaches).toBe(1);
   });
 
   it('收款方接近安全整數上限時,賠償金額 clamp,不產生不精確餘額', async () => {

@@ -260,25 +260,24 @@ export async function saveWorldState(
   ).forEach((s) => stmts.push(s));
 
   newEvents.forEach((e, i) => {
+    // Codex 四審①-1:events.id 仍用 next_event_seq(claimEventSeqRange)產生——這個計數器
+    // per-season 歸零沒關係,因為 id 字串本身已含 seasonId 前綴,不同賽季的 id 不會撞號。
     const id = makeId('event', next.seasonId, eventSeqStart + i);
     const row = eventToRow(next.seasonId, id, e, eventCreatedAt);
-    // ③-3/③-4:seq 顯式指定為 claimEventSeqRange 認領到的號碼(不依賴 SQLite 自動配發)——
-    // events.seq 雖宣告 AUTOINCREMENT,SQLite 允許 INSERT 時明確指定 INTEGER PRIMARY KEY 的值
-    // (AUTOINCREMENT 只保證「之後自動配發的值不會小於等於曾經出現過的最大值」,不禁止顯式指定)。
-    // 沿用既有的原子 seq 認領機制(claimEventSeqRange,同一批次內連號),同時讓 events.seq 真正
-    // 是資料庫層面「絕不重複配發」的主鍵,不只是 app 端算出來的一個普通欄位。
-    // ③-3/③-4:events.seq 顯式指定為 eventSeqStart+i+1(1-indexed)——next_event_seq 計數器
-    // 本身從 0 起算(claimEventSeqRange 第一次呼叫回傳 0),若直接把 0 當第一筆事件的 seq,
-    // getEventsSince 的 cursor 語意「since=0 代表尚未看過任何事件」會與「第一筆事件的 seq 恰好
-    // 也是 0」衝突(`seq > 0` 排除掉它,永遠漏掉第一筆)。+1 shift 讓 seq 從 1 起算,呼應原本
-    // rowid-based cursor(rowid 本就從 1 起算)的语意,不影响 next_event_seq 計數器本身的累加。
-    const seq = eventSeqStart + i + 1;
+    // Codex 四審①-1:events.seq 是全表(跨賽季共用)的 INTEGER PRIMARY KEY AUTOINCREMENT——
+    // 舊版顯式指定 seq = eventSeqStart+i+1(基於 per-season 的 next_event_seq,每季從 0 起算),
+    // 第二季的第一筆事件會拿到與第一季第一筆事件相同的 seq(=1),INSERT 撞主鍵。
+    // 改成完全不指定 seq,交給 SQLite AUTOINCREMENT 全域配發(保證跨賽季也不重複、且單調遞增,
+    // getEventsSince 的 cursor 語意不變)。events_nations 需要的 event_seq 這裡還不知道實際值
+    // (要等 INSERT 執行完才由 AUTOINCREMENT 決定),改用子查詢 `SELECT seq FROM events WHERE
+    // id = ?` 取得——同一個 batch 是單一交易、依序執行,這條子查詢執行時,前面那條 events
+    // INSERT 已經生效,能查到剛寫入的那一列(id 全域唯一,子查詢恰好命中一筆)。
     stmts.push(
       db
         .prepare(
-          'INSERT INTO events (seq, id, season_id, tick, type, nation_ids, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+          'INSERT INTO events (id, season_id, tick, type, nation_ids, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
         )
-        .bind(seq, row.id, row.season_id, row.tick, row.type, row.nation_ids, row.payload, row.created_at)
+        .bind(row.id, row.season_id, row.tick, row.type, row.nation_ids, row.payload, row.created_at)
     );
     // ①-12/②-17/③-2/③-4:events_nations 正規化子表——getEventsSince 改走這張表查詢(以
     // event_seq 為鍵,不再是 event_id),不再對 events.nation_ids 做 LIKE 全表掃描。③-2:補上
@@ -286,8 +285,11 @@ export async function saveWorldState(
     for (const nationId of e.nationIds) {
       stmts.push(
         db
-          .prepare('INSERT OR IGNORE INTO events_nations (event_seq, nation_id, season_id) VALUES (?, ?, ?)')
-          .bind(seq, nationId, next.seasonId)
+          .prepare(
+            `INSERT OR IGNORE INTO events_nations (event_seq, nation_id, season_id)
+             SELECT seq, ?, ? FROM events WHERE id = ?`
+          )
+          .bind(nationId, next.seasonId, row.id)
       );
     }
   });
@@ -472,17 +474,33 @@ export interface UserRow {
   created_at: number;
 }
 
+function insertUserStmt(db: D1Database, row: UserRow): D1PreparedStatement {
+  return db
+    .prepare(
+      `INSERT INTO users
+      (id, email, password_hash, password_salt, password_iterations, verified, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .bind(row.id, row.email, row.password_hash, row.password_salt, row.password_iterations, row.verified, row.created_at);
+}
+
 export async function insertUser(db: D1Database, row: UserRow): Promise<void> {
-  await runOne(
-    db
-      .prepare(
-        `INSERT INTO users
-        (id, email, password_hash, password_salt, password_iterations, verified, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`
-      )
-      .bind(row.id, row.email, row.password_hash, row.password_salt, row.password_iterations, row.verified, row.created_at),
-    `insertUser id=${row.id}`
-  );
+  await runOne(insertUserStmt(db, row), `insertUser id=${row.id}`);
+}
+
+/** Codex 四審②:register 的 user INSERT + verification_token INSERT 併入同一 batch(單一交易)
+ * 原子寫入——舊版分兩次獨立呼叫(insertUser 先跑、insertVerificationToken 後跑),兩者之間若
+ * process 中途崩潰(例如 Worker 被強制終止)或第二次呼叫拋錯,會留下「使用者已建立、但沒有任何
+ * verification token」的半成品帳號——這個帳號永遠無法驗證信箱(resend 需要先查到 user,查得到,
+ * 但使用者從未收到過第一封信,也不知道要主動點 resend),等同卡死。改成單一 batch,要嘛兩筆都
+ * 成功,要嘛都不成功(users.email 撞唯一鍵時,原始 driver 例外仍會從 db.batch() 拋出,呼叫端
+ * service.ts 的 unique-constraint 轉譯邏輯不受影響)。 */
+export async function insertUserWithVerificationToken(
+  db: D1Database,
+  userRow: UserRow,
+  tokenRow: VerificationTokenRow
+): Promise<void> {
+  await runBatch(db, [insertUserStmt(db, userRow), insertVerificationTokenStmt(db, tokenRow)]);
 }
 
 export async function findUserByEmail(db: D1Database, normalizedEmail: string): Promise<UserRow | null> {
@@ -508,13 +526,43 @@ export interface VerificationTokenRow {
   created_at: number;
 }
 
+function insertVerificationTokenStmt(db: D1Database, row: VerificationTokenRow): D1PreparedStatement {
+  return db
+    .prepare('INSERT INTO verification_tokens (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)')
+    .bind(row.token_hash, row.user_id, row.expires_at, row.created_at);
+}
+
 export async function insertVerificationToken(db: D1Database, row: VerificationTokenRow): Promise<void> {
-  await runOne(
+  await runOne(insertVerificationTokenStmt(db, row), `insertVerificationToken user=${row.user_id}`);
+}
+
+/** Codex 四審③:同一 user 名下最多保留幾筆 verification_tokens——每次 resend 都會新增一列
+ * (見表註解,天生不覆蓋),沒有上限的話,一個持續狂點「重寄驗證信」的帳號會讓這張表無限增長。 */
+export const VERIFICATION_TOKEN_KEEP_MAX = 5;
+
+/** Codex 四審③:插入新 token 時同一 batch 一併清理該 user 名下的舊 token——
+ * (1) 先刪掉已過期的列(expires_at <= now),
+ * (2) 插入這次的新 token,
+ * (3) 再依 created_at 只保留最新 VERIFICATION_TOKEN_KEEP_MAX 筆(含剛插入的這筆),超過上限的
+ *     舊列一併清掉——即使使用者從未點過任何驗證連結、也沒等到任何一筆自然過期,持續狂按
+ *     resend 也不會讓這張表對該 user 無限增長。三個步驟包成單一 batch 原子執行。 */
+export async function insertVerificationTokenWithCleanup(
+  db: D1Database,
+  row: VerificationTokenRow,
+  now: number,
+  keepMax: number = VERIFICATION_TOKEN_KEEP_MAX
+): Promise<void> {
+  await runBatch(db, [
+    db.prepare('DELETE FROM verification_tokens WHERE user_id = ? AND expires_at <= ?').bind(row.user_id, now),
+    insertVerificationTokenStmt(db, row),
     db
-      .prepare('INSERT INTO verification_tokens (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)')
-      .bind(row.token_hash, row.user_id, row.expires_at, row.created_at),
-    `insertVerificationToken user=${row.user_id}`
-  );
+      .prepare(
+        `DELETE FROM verification_tokens WHERE user_id = ? AND token_hash NOT IN (
+           SELECT token_hash FROM verification_tokens WHERE user_id = ? ORDER BY created_at DESC LIMIT ?
+         )`
+      )
+      .bind(row.user_id, row.user_id, keepMax),
+  ]);
 }
 
 export async function findVerificationToken(db: D1Database, tokenHash: string): Promise<VerificationTokenRow | null> {
@@ -522,9 +570,37 @@ export async function findVerificationToken(db: D1Database, tokenHash: string): 
 }
 
 /** verifyEmail 成功後呼叫——刪掉該 user 名下所有 verification_tokens 列(不論驗證時用的是哪
- * 一個),避免用過的舊 token 或其他仍未過期的並存 token 繼續有效。 */
+ * 一個),避免用過的舊 token 或其他仍未過期的並存 token 繼續有效。
+ * Codex 四審④:改用 runOne(統一走「單語句成功檢查」路徑,見 runOne 註解)——舊版直接
+ * `.run()` 不檢查回傳的 success flag,D1 對單一 statement 也可能 success:false 而不拋例外,
+ * 不檢查就會靜默漏刪,呼叫端(verifyEmail)卻以為舊 token 已清空。 */
 export async function deleteVerificationTokensForUser(db: D1Database, userId: string): Promise<void> {
-  await db.prepare('DELETE FROM verification_tokens WHERE user_id = ?').bind(userId).run();
+  await runOne(
+    db.prepare('DELETE FROM verification_tokens WHERE user_id = ?').bind(userId),
+    `deleteVerificationTokensForUser user=${userId}`
+  );
+}
+
+/** Codex 四審④:verifyEmail 的「標記已驗證」+「清空該 user 的所有 verification_tokens」併入
+ * 同一 batch 原子寫入——舊版分兩次獨立呼叫,兩者之間中途失敗會留下「使用者已標記 verified,
+ * 但舊 token 沒清掉(仍可再次拿去用 verifyEmail 打一次,雖然 markUserVerified 是 idempotent
+ * 不會出錯,但語意上不乾淨)」或反過來的不一致窗口。 */
+/** Codex 四審③(補):與 insertVerificationTokenWithCleanup 互補的全域清理路徑——後者只在
+ * 「該 user 又插入新 token」時才順帶清掉自己的過期列,一個註冊後從未 resend、也從未點驗證信
+ * 的 user,他名下那唯一一筆 token 過期後永遠不會被清掉(沒有下一次插入觸發清理)。這裡供
+ * tick-cron(runTick)每次跑合定期呼叫一次,全表掃過期列直接刪除,不分 user。 */
+export async function cleanupExpiredVerificationTokens(db: D1Database, now: number): Promise<void> {
+  await runOne(
+    db.prepare('DELETE FROM verification_tokens WHERE expires_at <= ?').bind(now),
+    `cleanupExpiredVerificationTokens now=${now}`
+  );
+}
+
+export async function finalizeEmailVerification(db: D1Database, userId: string): Promise<void> {
+  await runBatch(db, [
+    db.prepare('UPDATE users SET verified = 1 WHERE id = ?').bind(userId),
+    db.prepare('DELETE FROM verification_tokens WHERE user_id = ?').bind(userId),
+  ]);
 }
 
 // ---- sessions ----
