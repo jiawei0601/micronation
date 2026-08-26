@@ -10,6 +10,8 @@ import {
   loadWorldState,
   getSeasonTickRunning,
   setSeasonTickRunning,
+  insertVerificationTokenAtomic,
+  findVerificationToken,
 } from '../src/db/repository';
 import { makeWorld, makeRegion, makeNation, makeMarch } from './support/fixtures';
 import { SEASON_LENGTH_TICKS } from '../src/game/constants';
@@ -24,6 +26,29 @@ describe('runTick — 基本 tick 推進', () => {
     const result = await runTick(db, { now: 0 });
     expect(result.ranTick).toBe(false);
     expect(result.skippedReason).toBe('NO_ACTIVE_SEASON');
+  });
+
+  it('Codex 五審④:無 active 賽季時,過期的 verification_tokens 仍會被全域清理', async () => {
+    const db = createTestD1();
+    await db
+      .prepare(
+        'INSERT INTO users (id, email, password_hash, password_salt, password_iterations, verified, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      )
+      .bind('user-no-season', 'no-season@example.com', 'h', 's', 1, 0, 0)
+      .run();
+    // expires_at=100,runTick 呼叫時 now=999999 早已過期——且這個賽季一個 active season 都
+    // 沒有(修復前:cleanupExpiredVerificationTokens 排在 getActiveSeasonId 的 NO_ACTIVE_SEASON
+    // 提早 return 之後,永遠不會被呼叫到,這筆過期列會卡死不刪)。
+    await insertVerificationTokenAtomic(
+      db,
+      { token_hash: 'stale-no-season', user_id: 'user-no-season', expires_at: 100, created_at: 0 },
+      0
+    );
+
+    const result = await runTick(db, { now: 999_999 });
+    expect(result.ranTick).toBe(false);
+    expect(result.skippedReason).toBe('NO_ACTIVE_SEASON');
+    expect(await findVerificationToken(db, 'stale-no-season')).toBeNull();
   });
 
   it('正常一輪:tick 推進 +1、季末寫回 D1', async () => {

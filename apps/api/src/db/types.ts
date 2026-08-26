@@ -7,6 +7,10 @@ export interface D1Result<T = unknown> {
   results: T[];
   success: boolean;
   meta?: Record<string, unknown>;
+  /** Codex 五審②:真正 D1 對 batch 內單一 statement 失敗時,success:false 常伴隨 error 訊息
+   * (不一定會拋原生例外,見 runBatch 開頭註解)——收攏在型別裡,讓 runBatch 能把它附進拋出的
+   * Error,呼叫端才有東西可以人工排查/做 fallback 判斷。 */
+  error?: string;
 }
 
 export interface D1PreparedStatement {

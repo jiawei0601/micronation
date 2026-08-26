@@ -65,13 +65,22 @@ CREATE UNIQUE INDEX idx_users_email ON users(email);
 -- 裡的 token 就此失效,即使那次寄信其實成功送達。改成多列表:每次產生 token 都是新增一列,
 -- 不覆寫任何既有列,天生免疫這種競態——多個同時有效的 token 並存完全合法(使用者用哪一封
 -- 信裡的都能驗證成功),驗證成功後一次刪光該 user 的所有列(不論用的是哪一個)。
+-- Codex 五審①:seq 改為真正的 INTEGER PRIMARY KEY AUTOINCREMENT(SQLite rowid alias),
+-- token_hash 降為 UNIQUE(而非 PRIMARY KEY)——resend/cleanup 需要一個「插入序」穩定鍵排序
+-- 保留最新 N 筆,created_at(epoch ms)在同一毫秒內對同一 user 連續 resend 時可能重複,無法
+-- 單獨當穩定排序鍵;seq 是單調遞增、不重複的插入序,不受時鐘精度影響。
 CREATE TABLE verification_tokens (
-  token_hash TEXT PRIMARY KEY,       -- SHA-256(token),不落地明文
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  token_hash TEXT NOT NULL UNIQUE,   -- SHA-256(token),不落地明文
   user_id TEXT NOT NULL REFERENCES users(id),
   expires_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL
 );
 CREATE INDEX idx_verification_tokens_user ON verification_tokens(user_id);
+-- Codex 五審③:cleanupExpiredVerificationTokens(全表 WHERE expires_at <= ?)與
+-- insertVerificationTokenAtomic(WHERE user_id = ? AND expires_at <= ?)都以 expires_at 為
+-- 過濾條件——沒有索引時隨表成長變成全表掃描。
+CREATE INDEX idx_verification_tokens_expires ON verification_tokens(expires_at);
 
 CREATE TABLE sessions (
   id TEXT PRIMARY KEY,               -- session token 的 SHA-256 雜湊(不落地明文)

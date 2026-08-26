@@ -11,7 +11,9 @@ import {
   markSeasonEnded,
   getEventsSince,
   insertUserWithVerificationToken,
-  insertVerificationTokenWithCleanup,
+  insertVerificationTokenAtomic,
+  cleanupVerificationTokensKeepingLatest,
+  deleteVerificationTokenByHash,
   finalizeEmailVerification,
   cleanupExpiredVerificationTokens,
   findVerificationToken,
@@ -176,20 +178,20 @@ describe('②-2 — register 的 user + verification_token 同一 batch(原子)'
   });
 });
 
-describe('③ — verification_tokens 插入時同 batch 清過期+保留上限', () => {
-  it('insertVerificationTokenWithCleanup:超過 VERIFICATION_TOKEN_KEEP_MAX 筆時只保留最新幾筆', async () => {
+describe('③ — verification_tokens 插入(清過期)+ 寄信成功後才 cap cleanup(Codex 五審①)', () => {
+  it('cleanupVerificationTokensKeepingLatest:超過 VERIFICATION_TOKEN_KEEP_MAX 筆時只保留最新幾筆', async () => {
     const db = createTestD1();
     await db
       .prepare('INSERT INTO users (id, email, password_hash, password_salt, password_iterations, verified, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .bind('user-cap', 'cap@example.com', 'h', 's', 1, 0, 0)
       .run();
 
+    let lastHash = '';
     for (let i = 0; i < VERIFICATION_TOKEN_KEEP_MAX + 3; i++) {
-      await insertVerificationTokenWithCleanup(
-        db,
-        { token_hash: `tok-${i}`, user_id: 'user-cap', expires_at: 999_999, created_at: i },
-        i
-      );
+      lastHash = `tok-${i}`;
+      await insertVerificationTokenAtomic(db, { token_hash: lastHash, user_id: 'user-cap', expires_at: 999_999, created_at: i }, i);
+      // 比照 resendVerification 實際呼叫順序:每次插入後(模擬寄信成功)立刻做 cap cleanup。
+      await cleanupVerificationTokensKeepingLatest(db, 'user-cap', lastHash);
     }
 
     const rows = await db.prepare('SELECT token_hash FROM verification_tokens WHERE user_id = ?').bind('user-cap').all<{ token_hash: string }>();
@@ -200,7 +202,7 @@ describe('③ — verification_tokens 插入時同 batch 清過期+保留上限'
     expect(kept.has(`tok-${VERIFICATION_TOKEN_KEEP_MAX + 2}`)).toBe(true);
   });
 
-  it('insertVerificationTokenWithCleanup:插入時順便清掉該 user 已過期的舊 token', async () => {
+  it('insertVerificationTokenAtomic:插入時順便清掉該 user 已過期的舊 token', async () => {
     const db = createTestD1();
     await db
       .prepare('INSERT INTO users (id, email, password_hash, password_salt, password_iterations, verified, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
@@ -211,10 +213,46 @@ describe('③ — verification_tokens 插入時同 batch 清過期+保留上限'
       .bind('expired-tok', 'user-exp', 100, 0)
       .run();
 
-    await insertVerificationTokenWithCleanup(db, { token_hash: 'fresh-tok', user_id: 'user-exp', expires_at: 999_999, created_at: 200 }, 200);
+    await insertVerificationTokenAtomic(db, { token_hash: 'fresh-tok', user_id: 'user-exp', expires_at: 999_999, created_at: 200 }, 200);
 
     expect(await findVerificationToken(db, 'expired-tok')).toBeNull();
     expect(await findVerificationToken(db, 'fresh-tok')).not.toBeNull();
+  });
+
+  it('Codex 五審①:寄信失敗時不做 cap cleanup、且刪掉這次的孤兒 token,既有舊 token 不受影響', async () => {
+    const db = createTestD1();
+    await db
+      .prepare('INSERT INTO users (id, email, password_hash, password_salt, password_iterations, verified, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .bind('user-failmail', 'failmail@example.com', 'h', 's', 1, 0, 0)
+      .run();
+    await insertVerificationTokenAtomic(db, { token_hash: 'existing-tok', user_id: 'user-failmail', expires_at: 999_999, created_at: 0 }, 0);
+
+    // resendVerification 實際順序:插入新 token → 寄信(失敗)→ deleteVerificationTokenByHash(新 token)。
+    await insertVerificationTokenAtomic(db, { token_hash: 'new-tok-mail-failed', user_id: 'user-failmail', expires_at: 999_999, created_at: 1 }, 1);
+    await deleteVerificationTokenByHash(db, 'new-tok-mail-failed');
+
+    expect(await findVerificationToken(db, 'existing-tok')).not.toBeNull();
+    expect(await findVerificationToken(db, 'new-tok-mail-failed')).toBeNull();
+  });
+
+  it('Codex 五審①:連續 resend(皆寄信成功)不誤刪剛寄出的最新 token', async () => {
+    const db = createTestD1();
+    await db
+      .prepare('INSERT INTO users (id, email, password_hash, password_salt, password_iterations, verified, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .bind('user-chain', 'chain@example.com', 'h', 's', 1, 0, 0)
+      .run();
+
+    const hashes = ['c-tok-0', 'c-tok-1', 'c-tok-2'];
+    for (let i = 0; i < hashes.length; i++) {
+      await insertVerificationTokenAtomic(db, { token_hash: hashes[i], user_id: 'user-chain', expires_at: 999_999, created_at: i }, i);
+      await cleanupVerificationTokensKeepingLatest(db, 'user-chain', hashes[i]);
+    }
+
+    // 三筆都在 KEEP_MAX 之內,全部應該還在——特別是最後一筆(剛寄出的)一定不能被自己觸發的
+    // cleanup 誤刪。
+    for (const h of hashes) {
+      expect(await findVerificationToken(db, h)).not.toBeNull();
+    }
   });
 
   it('cleanupExpiredVerificationTokens:tick 路徑的全域清理路徑,獨立於任何 user 的插入時機', async () => {

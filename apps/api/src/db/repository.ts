@@ -29,9 +29,12 @@ async function runBatch(db: D1Database, stmts: D1PreparedStatement[]): Promise<v
   if (failedIndex !== -1) {
     // ①-10:原本只回報「第幾筆失敗」,附上該筆的 D1Result(含 meta,可能有底層 driver 給的
     // 錯誤碼/訊息)供人工排查,不只是一個裸字串。
+    // Codex 五審②:再附上 D1Result.error——真正 D1 對 batch 內單一 statement 失敗時,success:
+    // false 不一定伴隨拋出的原生例外(同本函式開頭註解),error 欄位常是唯一能取得的失敗原因;
+    // 呼叫端(如 auth/service.ts register 的 EMAIL_TAKEN fallback 判斷)可能需要這段內容。
     const failed = results[failedIndex];
     throw new Error(
-      `D1_BATCH_FAILED: statement #${failedIndex} did not succeed; meta=${JSON.stringify(failed?.meta ?? null)}`
+      `D1_BATCH_FAILED: statement #${failedIndex} did not succeed; error=${failed?.error ?? 'unknown'}; meta=${JSON.stringify(failed?.meta ?? null)}`
     );
   }
 }
@@ -540,29 +543,54 @@ export async function insertVerificationToken(db: D1Database, row: VerificationT
  * (見表註解,天生不覆蓋),沒有上限的話,一個持續狂點「重寄驗證信」的帳號會讓這張表無限增長。 */
 export const VERIFICATION_TOKEN_KEEP_MAX = 5;
 
-/** Codex 四審③:插入新 token 時同一 batch 一併清理該 user 名下的舊 token——
- * (1) 先刪掉已過期的列(expires_at <= now),
- * (2) 插入這次的新 token,
- * (3) 再依 created_at 只保留最新 VERIFICATION_TOKEN_KEEP_MAX 筆(含剛插入的這筆),超過上限的
- *     舊列一併清掉——即使使用者從未點過任何驗證連結、也沒等到任何一筆自然過期,持續狂按
- *     resend 也不會讓這張表對該 user 無限增長。三個步驟包成單一 batch 原子執行。 */
-export async function insertVerificationTokenWithCleanup(
-  db: D1Database,
-  row: VerificationTokenRow,
-  now: number,
-  keepMax: number = VERIFICATION_TOKEN_KEEP_MAX
-): Promise<void> {
+/** Codex 五審①:原本 insertVerificationTokenWithCleanup 把「插入新 token」與「保留上限
+ * (cap cleanup,只留最新 keepMax 筆)」包在同一個 batch,搶在寄信之前就把舊列砍到剩
+ * keepMax-1 筆再插入這筆湊滿 keepMax——若這次插入之後緊接著寄信失敗(finding #16 的既有
+ * 前提:寄信失敗不該讓使用者失去退路),使用者手上那些「先前已成功寄出、仍未過期」的舊信
+ * 裡的 token,有可能因為剛好落在被砍掉的那批裡而提前失效,即使這次 resend 根本沒有真的寄出
+ * 新信——退路反而變窄。改成兩階段,呼叫端(auth/service.ts resendVerification)必須依序:
+ * (1) insertVerificationTokenAtomic——只做「清過期 + 插入新 token」,不做保留上限的淘汰;
+ * (2) 寄信;
+ * (3) 寄信成功 → cleanupVerificationTokensKeepingLatest(此時才安全砍到 keepMax,新 token
+ *     已確定寄達,不怕使用者兩頭落空);寄信失敗 → deleteVerificationTokenByHash(刪掉這次
+ *     插入但沒寄出去的孤兒 token,不留在表裡佔位、也不誤導使用者以為它有效)。 */
+export async function insertVerificationTokenAtomic(db: D1Database, row: VerificationTokenRow, now: number): Promise<void> {
   await runBatch(db, [
     db.prepare('DELETE FROM verification_tokens WHERE user_id = ? AND expires_at <= ?').bind(row.user_id, now),
     insertVerificationTokenStmt(db, row),
+  ]);
+}
+
+/** 寄信成功後才呼叫——保留該 user 最新 keepMax 筆,排序鍵用 seq(AUTOINCREMENT 插入序,單調
+ * 遞增不重複),不用 created_at(同一 user 連續 resend 可能落在同一毫秒,無法單獨當穩定排序
+ * 鍵)。keepTokenHash(本次剛寄出、寄信已成功的 token)額外用 `token_hash != ?` 明確排除在
+ * 刪除範圍外——即使它基於某種理由不在「最新 keepMax 筆」之列(理論上不會,它是剛插入的
+ * 最新一筆,但不依賴這個假設),這道清理也絕不會誤刪它。 */
+export async function cleanupVerificationTokensKeepingLatest(
+  db: D1Database,
+  userId: string,
+  keepTokenHash: string,
+  keepMax: number = VERIFICATION_TOKEN_KEEP_MAX
+): Promise<void> {
+  await runOne(
     db
       .prepare(
-        `DELETE FROM verification_tokens WHERE user_id = ? AND token_hash NOT IN (
-           SELECT token_hash FROM verification_tokens WHERE user_id = ? ORDER BY created_at DESC LIMIT ?
+        `DELETE FROM verification_tokens WHERE user_id = ? AND token_hash != ? AND token_hash NOT IN (
+           SELECT token_hash FROM verification_tokens WHERE user_id = ? ORDER BY seq DESC LIMIT ?
          )`
       )
-      .bind(row.user_id, row.user_id, keepMax),
-  ]);
+      .bind(userId, keepTokenHash, userId, keepMax),
+    `cleanupVerificationTokensKeepingLatest user=${userId}`
+  );
+}
+
+/** 寄信失敗後才呼叫——刪掉這次剛插入、但信沒寄出去的孤兒 token(見上方 insertVerificationTokenAtomic
+ * 註解的兩階段設計)。 */
+export async function deleteVerificationTokenByHash(db: D1Database, tokenHash: string): Promise<void> {
+  await runOne(
+    db.prepare('DELETE FROM verification_tokens WHERE token_hash = ?').bind(tokenHash),
+    `deleteVerificationTokenByHash hash=${tokenHash}`
+  );
 }
 
 export async function findVerificationToken(db: D1Database, tokenHash: string): Promise<VerificationTokenRow | null> {

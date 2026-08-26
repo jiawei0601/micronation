@@ -6,7 +6,9 @@ import {
   findUserById,
   insertUserWithVerificationToken,
   finalizeEmailVerification,
-  insertVerificationTokenWithCleanup,
+  insertVerificationTokenAtomic,
+  cleanupVerificationTokensKeepingLatest,
+  deleteVerificationTokenByHash,
   findVerificationToken,
   insertSession,
   findSession,
@@ -73,6 +75,16 @@ export async function register(
     // 違規(理論上不該在這個 batch 發生,但保守起見不要一律吞成 EMAIL_TAKEN)原樣往上拋,讓
     // index.ts onError 走 500,不要用一個語意不符的 400 錯誤蓋過去。
     if (isUniqueConstraintErrorOn(e, 'users.email')) return err('EMAIL_TAKEN');
+    // Codex 五審②:上面的字串比對依賴「driver 拋出的原生例外訊息長得像
+    // `UNIQUE constraint failed: users.email`」——但 runBatch 對 D1 batch 內單一 statement
+    // 失敗(success:false)不保證有這種格式的原生例外可拋(見 runBatch 開頭註解,依 driver/
+    // 後端而定),此時 catch 到的是 runBatch 自己組出的 `D1_BATCH_FAILED: ...` 訊息,不含
+    // "unique constraint" 字樣,上面的判斷永遠不會命中,email 已存在卻誤回 500。
+    // fallback:不依賴訊息格式,直接查一次這個 email 是否已存在——存在就是 EMAIL_TAKEN(不論
+    // 是哪個 batch statement 回報失敗、也不論錯誤訊息長什麼樣子),否則保留原始例外往上拋
+    // (不要把非 EMAIL_TAKEN 的真正故障,例如 D1 連線中斷,誤吞成 400)。
+    const existing = await findUserByEmail(db, normalized);
+    if (existing) return err('EMAIL_TAKEN');
     throw e;
   }
 
@@ -108,10 +120,11 @@ export async function resendVerification(
   const verifyToken = randomHex(16);
   const verifyTokenHash = await sha256Hex(verifyToken);
 
-  // Codex 四審③:插入時同一 batch 清理該 user 過期/超量的舊 token(見 db/repository.ts
-  // insertVerificationTokenWithCleanup 註解)——resend 是使用者能重複觸發最多次的路徑,
-  // 沒有這道清理,持續狂點 resend 會讓 verification_tokens 對這個 user 無限增長。
-  await insertVerificationTokenWithCleanup(db, {
+  // Codex 五審①:插入與「保留上限」的淘汰拆成兩階段(見 db/repository.ts
+  // insertVerificationTokenAtomic 註解)——先原子地清過期+插入這次的新 token,此時還不做
+  // cap cleanup,避免「插入後緊接著寄信失敗」時,先前已成功寄出、仍未過期的舊 token 被這次
+  // 註定寄不出去的新 token 頂替出局。
+  await insertVerificationTokenAtomic(db, {
     token_hash: verifyTokenHash,
     user_id: user.id,
     expires_at: now + VERIFY_TOKEN_TTL_MS,
@@ -124,6 +137,18 @@ export async function resendVerification(
   } catch {
     mailSent = false;
   }
+
+  if (mailSent) {
+    // 信確定寄達,這次的新 token 是「有效退路」——現在才安全做 cap cleanup(保留最新 5 筆,
+    // 明確排除這次剛寄出的 token,見函式註解)。resend 是使用者能重複觸發最多次的路徑,沒有
+    // 這道清理會讓 verification_tokens 對這個 user 無限增長。
+    await cleanupVerificationTokensKeepingLatest(db, user.id, verifyTokenHash);
+  } else {
+    // 信沒寄出去,這次插入的 token 使用者永遠拿不到、也不該佔用 keepMax 名額或誤導使用者以
+    // 為它有效——直接刪掉,既有的舊 token(若有)完全不受影響。
+    await deleteVerificationTokenByHash(db, verifyTokenHash);
+  }
+
   return ok({ mailSent });
 }
 

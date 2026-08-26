@@ -139,19 +139,22 @@ function buildHallOfFameEntries(seasonId: Id, nations: Nation[]): HallOfFameEntr
  * 一次「讀-算-寫」:NPC 決策套用在讀到的 prev 快照之上,resolveTick 之後單一 saveWorldState
  * 差異寫回。 */
 export async function runTick(db: D1Database, opts: RunTickOptions): Promise<RunTickResult> {
-  const seasonId = await getActiveSeasonId(db);
-  if (!seasonId) return { ranTick: false, skippedReason: 'NO_ACTIVE_SEASON' };
-
-  // Codex 四審③(補):tick 路徑順手做一次全域 verification_tokens 過期清理——與
-  // insertVerificationTokenWithCleanup(僅在該 user 又插入新 token 時觸發)互補,涵蓋「user
-  // 從未 resend、token 自然過期後永遠沒有下一次插入觸發清理」的情況。與 season/tick lease
-  // 完全無關(verification_tokens 不屬於任何 season),獨立包 try/catch——這裡失敗不該讓整個
-  // tick 中斷,下一次 tick(一小時後)重試即可。
+  // Codex 五審④:移到 getActiveSeasonId 之前(整個函式最前面)呼叫——舊版放在
+  // `if (!seasonId) return ...` 之後,沒有 active season 時會提早 return,這道全域過期清理
+  // 整個被跳過。verification_tokens 完全不屬於任何 season(user 可能在沒有 active season 的
+  // 空窗期註冊/resend),不該讓它的清理時機被「有沒有 active season」這個無關的條件卡住——
+  // 與 insertVerificationTokenAtomic/cleanupVerificationTokensKeepingLatest(僅在該 user 又
+  // 插入新 token 時觸發)互補,涵蓋「user 從未 resend、token 自然過期後永遠沒有下一次插入
+  // 觸發清理」的情況。獨立包 try/catch——這裡失敗不該讓整個 tick(或這次「沒有 active
+  // season」的提早 return)受影響,下一次 tick(一小時後)重試即可。
   try {
     await cleanupExpiredVerificationTokens(db, opts.now);
   } catch (e) {
     console.error('[tick] cleanupExpiredVerificationTokens failed (non-fatal)', e);
   }
+
+  const seasonId = await getActiveSeasonId(db);
+  if (!seasonId) return { ranTick: false, skippedReason: 'NO_ACTIVE_SEASON' };
 
   // ③-5:順序改成「先搶 tick lease,成功後才認領時槽」——原本先 claimTickSlot 再 claimTickLease
   // 時,若這次觸發搶到了時槽(標記「這個時槽已處理」)、但緊接著搶 lease 失敗(另一個 runTick
