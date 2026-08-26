@@ -16,7 +16,14 @@
 
 ## 下一步
 1. ✅M0-M9 全部完成且 Codex approve(2026-08-26)。
-2. **Cloudflare 部署**(下一步,需使用者在場):註冊/登入 CF→`wrangler login`→建 D1(micronation-db,
+2. ✅**已部署上線(2026-08-26)**:https://micronation-api.micronation.workers.dev
+   單 Worker 同源服務前端(assets)+API+每小時 cron;D1=micronation-db(id 見 wrangler.toml);
+   S1 已開季(5 區/8 NPC);煙霧測試通過(註冊→登入→開國→建設→任務→市場,UI 實測 OK)。
+   ADMIN_TOKEN 在本機 ~/.micronation-admin-token(勿入 repo);部署指令=`npm run build -w @micronation/web && npx wrangler --cwd apps/api deploy`。
+   ⚠️PBKDF2 用 100k(CF Workers WebCrypto 硬上限,非疏漏)。
+   ⚠️ENVIRONMENT=development(mail 走 console):**email 驗證信寄不到使用者**→無法解鎖貿易。
+   轉正式=申請 Resend(免費)→`wrangler secret put RESEND_API_KEY`→補完 ResendMailSender 模板→ENVIRONMENT=production。
+   (原部署步驟紀錄):註冊/登入 CF→`wrangler login`→建 D1(micronation-db,
    替換 wrangler.toml placeholder id)→跑 migration→`wrangler secret put ADMIN_TOKEN`(+正式寄信需
    RESEND_API_KEY,無則 ENVIRONMENT 必須非 production 語意——mail fail-closed 見 index.ts)→部署
    Workers+Pages→admin 開 S1(POST /api/admin/season)→煙霧測試(註冊/開國/tick)。
