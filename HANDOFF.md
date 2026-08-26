@@ -7,7 +7,7 @@
 - Phase 1-4:grill 15 決策、UI 定案(C 地圖主殼+B 面板+A 公文點綴,原型 prototype/ui-variants.html)、PRD(#1)、issues M0-M9、CONTRACT v1。
 - M0 monorepo scaffold(npm workspaces、shared 型別/常數/RNG/Result、vitest+tsc 綠)。
 - M1-M5(engine/market/diplomacy/military/npc)五模塊平行實作+收攏(統一常數/型別)。
-- Codex 二輪審查共 41 findings 全修:第一輪 25 findings(commit 0645c29)+第二輪 16 findings
+- Codex 審查四輪收斂:41+16+6 findings 全修,四審 approve(2026-08-26,session 01a03cb9)。M0-M5 可交付。
   (本次,2026-08-26)。第二輪重點:engine 戰功計分移除 `|| 1` fallback、diplomacy 統一
   `validateTerms`(kind 相容性+tick 驗證)、market 撮合前 notional/tariff safe-integer 檢查、
   military march id 改用 `WorldState.nextMarchSeq` 單調計數器(取代原本 finding #21 的
