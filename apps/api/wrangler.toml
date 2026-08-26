@@ -6,7 +6,19 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "micronation-db"
-database_id = "00000000-0000-0000-0000-000000000000" # placeholder — 建立實體 D1 後由 `wrangler d1 create` 覆蓋
+database_id = "18f2f630-ecd7-49e2-865a-b0376aa338f0" # 2026-08-26 wrangler d1 create 產生
+
+# 前端同源部署:同一 Worker 服務 apps/web 的 build 產物,/api/* 進 Hono,其餘走 SPA fallback。
+# 部署前先 `npm run build -w @micronation/web`。
+[assets]
+directory = "../web/dist"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
+[vars]
+# 暫定 development:尚無 RESEND_API_KEY,mail fail-closed 會擋掉 production 的註冊。
+# 申請 Resend 後改 production 並 `wrangler secret put RESEND_API_KEY`。
+ENVIRONMENT = "development"
 
 [triggers]
 crons = ["0 * * * *"]

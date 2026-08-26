@@ -1,7 +1,10 @@
 // PBKDF2-SHA256 密碼雜湊,經 WebCrypto(Workers 與 Node 18+ 皆內建 globalThis.crypto.subtle)。
 // 不用第三方雜湊庫,避免 Workers 環境相容性問題。
 
-export const PBKDF2_ITERATIONS = 600_000; // OWASP 現行建議(2023+ PBKDF2-SHA256 下限)
+// OWASP 建議 600k,但 Cloudflare Workers 的 WebCrypto 硬性上限 100k(實測 2026-08-26:
+// "Pbkdf2 failed: iteration counts above 100000 are not supported")。取平台可行上限;
+// users 表逐列存 iterations,未來平台放寬時提高常數即可,舊帳號仍以存量值驗證。
+export const PBKDF2_ITERATIONS = 100_000;
 const HASH_BITS = 256;
 const SALT_BYTES = 16;
 
