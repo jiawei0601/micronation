@@ -3,23 +3,26 @@
 
 import type { WorldState, Nation, Id, GameEvent } from '@micronation/shared';
 import type { D1Database } from '../db/types';
-import { loadWorldState, saveWorldState, getActiveSeasonId } from '../db/repository';
+import { loadWorldState, saveWorldState, getActiveSeasonId, getSeasonTickRunning } from '../db/repository';
 
 export interface ActiveWorld {
   seasonId: Id;
   state: WorldState;
+  /** true = tick-cron(M8 runTick)正在跑本賽季。寫入路由須在套用變更前檢查,進行中回 503。 */
+  tickRunning: boolean;
 }
 
 /**
- * 載入目前 active 賽季的完整 WorldState。null = 尚無 active 賽季(M7 範圍:賽季由外部
- * 種子腳本/M8 建立,api 層不負責開季)。
+ * 載入目前 active 賽季的完整 WorldState。null = 尚無 active 賽季(單賽季由 M8 admin 端點
+ * /api/admin/season 開季)。
  */
 export async function loadActiveWorld(db: D1Database): Promise<ActiveWorld | null> {
   const seasonId = await getActiveSeasonId(db);
   if (!seasonId) return null;
   const state = await loadWorldState(db, seasonId);
   if (!state) return null;
-  return { seasonId, state };
+  const tickRunning = await getSeasonTickRunning(db, seasonId);
+  return { seasonId, state, tickRunning };
 }
 
 export function findOwnNation(state: WorldState, userId: Id): Nation | null {

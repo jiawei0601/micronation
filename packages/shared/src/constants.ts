@@ -147,6 +147,10 @@ export function warehouseCapacity(level: number): number {
 }
 
 export const TRAIN_COST_PER_UNIT: Partial<Record<ResourceKind, number>> = { money: 5 };
+
+// 練兵徵兵上限——army.size 不得超過 population × 此比例(原 npc 本地假設,M8 收攏至 shared,
+// 供 api 層 applyTrain 與 npc 決策共用同一份常數)。
+export const ARMY_POPULATION_RATIO_CAP = 0.3;
 export const BUILD_QUEUE_CAPACITY = 1; // 單一建造佇列同時可排入數量
 
 export const NPC_INITIAL_RESOURCES: Resources = { food: 300, ore: 200, fuel: 100, money: 500 };

@@ -1,6 +1,6 @@
 // Hono app 骨架——/api/auth/* + M7 全路由薄殼(nation/world/build/policy/market/military/
-// diplomacy/messages/rankings/tasks)。薄殼:驗 session→組 ctx→呼叫純模塊→寫 DB。
-// 錯誤格式統一 { error: string } + 4xx。
+// diplomacy/messages/rankings/tasks)+ M8 /api/admin/season + Cron Trigger scheduled handler。
+// 薄殼:驗 session→組 ctx→呼叫純模塊→寫 DB。錯誤格式統一 { error: string } + 4xx。
 
 import { Hono } from 'hono';
 import type { Env } from './db/types';
@@ -19,6 +19,8 @@ import diplomacyRoutes from './routes/diplomacy';
 import messagesRoutes from './routes/messages';
 import rankingsRoutes from './routes/rankings';
 import tasksRoutes from './routes/tasks';
+import adminRoutes from './routes/admin';
+import { runTick } from './tick/run';
 
 const app = new Hono<{ Bindings: Env }>();
 const mailSender = new ConsoleMailSender();
@@ -79,10 +81,37 @@ app.route('/api/diplomacy', diplomacyRoutes);
 app.route('/api/messages', messagesRoutes);
 app.route('/api/rankings', rankingsRoutes);
 app.route('/api/tasks', tasksRoutes);
+app.route('/api/admin', adminRoutes);
 
-export default app;
+export { app };
+
+// Cron Trigger 入口(wrangler.toml [triggers] crons)——每小時整點呼叫 runTick 做一次
+// 「讀-算-寫」:NPC 決策 → engine.resolveTick → 差異寫回 + events → 推進 tick;賽季到期時
+// 額外寫名人堂並標記 ended。ScheduledController/ExecutionContext 型別依 duck typing 放寬,
+// 理由同 db/types.ts D1Database(不依賴 @cloudflare/workers-types 也能通過型別檢查)。
+export async function scheduled(
+  _event: { cron?: string; scheduledTime?: number },
+  env: Env,
+  ctx: { waitUntil(promise: Promise<unknown>): void }
+): Promise<void> {
+  const now = Date.now();
+  ctx.waitUntil(
+    runTick(env.DB, { now }).then((result) => {
+      if (!result.ranTick) {
+        console.log(`[tick] skipped: ${result.skippedReason}`);
+      } else {
+        console.log(`[tick] season ${result.seasonId} advanced, ${result.eventCount} events${result.seasonEnded ? ' (season ended)' : ''}`);
+      }
+    })
+  );
+}
+
+export default {
+  fetch: app.fetch.bind(app),
+  scheduled,
+};
 
 // 保留給既有測試/呼叫端引用的 placeholder(M2 scaffold 遺留)。
 export function placeholder(): string {
-  return 'apps/api scaffold — M7 全路由薄殼已上線,M8 待接 tick-cron';
+  return 'apps/api scaffold — M7 全路由薄殼 + M8 tick-cron 已上線';
 }

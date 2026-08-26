@@ -1,7 +1,7 @@
 // D1 repository 層——loadWorldState/saveWorldState(差異寫回)+ user/session CRUD。
 // 只做 prepared statement 組裝與 batch 呼叫,不含業務邏輯(業務邏輯在 packages/* 純模塊)。
 
-import type { WorldState, GameEvent, Id, Trade, ResourceKind } from '@micronation/shared';
+import type { WorldState, GameEvent, Id, Trade, ResourceKind, ScoreBreakdown } from '@micronation/shared';
 import { makeId } from '@micronation/shared';
 import type { D1Database, D1PreparedStatement } from './types';
 import {
@@ -360,6 +360,66 @@ export async function incrementSeasonOrderSeq(db: D1Database, seasonId: Id): Pro
     .prepare('UPDATE seasons SET next_order_seq = next_order_seq + 1 WHERE id = ?')
     .bind(seasonId)
     .run();
+}
+
+// ---- tick-cron 競態緩解旗標(M8) ----
+
+/** runTick 開頭讀取:旗標為真代表本賽季已有一次 tick 正在跑,呼叫端應跳過本輪。 */
+export async function getSeasonTickRunning(db: D1Database, seasonId: Id): Promise<boolean> {
+  const row = await db
+    .prepare('SELECT tick_running FROM seasons WHERE id = ?')
+    .bind(seasonId)
+    .first<{ tick_running: number }>();
+  return !!row?.tick_running;
+}
+
+export async function setSeasonTickRunning(db: D1Database, seasonId: Id, running: boolean): Promise<void> {
+  await db
+    .prepare('UPDATE seasons SET tick_running = ? WHERE id = ?')
+    .bind(running ? 1 : 0, seasonId)
+    .run();
+}
+
+/** 賽季到期結算——標記 ended,不刪資料(名人堂/歷史查詢仍可能需要)。 */
+export async function markSeasonEnded(db: D1Database, seasonId: Id, endedAt: number): Promise<void> {
+  await db
+    .prepare("UPDATE seasons SET status = 'ended', ended_at = ? WHERE id = ?")
+    .bind(endedAt, seasonId)
+    .run();
+}
+
+export interface HallOfFameEntry {
+  seasonId: Id;
+  nationId: Id;
+  nationName: string;
+  ownerId: Id | null;
+  finalScore: ScoreBreakdown;
+  rank: number;
+  /** null = 總分前三名(rank 1-3);否則為分項冠軍識別碼(economy|warfare|tech|diplomacy,rank 固定 1)。 */
+  category: string | null;
+}
+
+export async function insertHallOfFameEntries(db: D1Database, entries: HallOfFameEntry[], createdAt: number): Promise<void> {
+  if (entries.length === 0) return;
+  const stmts = entries.map((e, i) =>
+    db
+      .prepare(
+        `INSERT INTO hall_of_fame (id, season_id, nation_id, nation_name, owner_id, final_score, rank, category, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(
+        makeId('hof', e.seasonId, e.nationId, e.category ?? 'overall', i),
+        e.seasonId,
+        e.nationId,
+        e.nationName,
+        e.ownerId,
+        JSON.stringify(e.finalScore),
+        e.rank,
+        e.category,
+        createdAt
+      )
+  );
+  await db.batch(stmts);
 }
 
 // ---- trades(市場成交紀錄,供 PriceRef 近期均價計算) ----

@@ -22,7 +22,9 @@ export interface D1Database {
   exec(query: string): Promise<D1Result>;
 }
 
-/** apps/api 的 Hono Env 綁定——DB 為必要 binding,tick-cron(M8)另掛 handler。 */
+/** apps/api 的 Hono Env 綁定——DB 為必要 binding,tick-cron(M8)另掛 scheduled handler。
+ * ADMIN_TOKEN:POST /api/admin/season 的 bearer token(wrangler secret,未設定時該端點一律 401)。 */
 export interface Env {
   DB: D1Database;
+  ADMIN_TOKEN?: string;
 }

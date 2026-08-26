@@ -19,6 +19,7 @@ import {
   FOOD_PER_POP,
   warehouseCapacity as sharedWarehouseCapacity,
   TRAIN_COST_PER_UNIT,
+  ARMY_POPULATION_RATIO_CAP,
   BUILD_QUEUE_CAPACITY,
   NPC_INITIAL_RESOURCES,
   NPC_INITIAL_BUILDINGS,
@@ -38,7 +39,6 @@ import {
 // ---- NPC 本地啟發式常數(純決策節奏,非遊戲平衡常數,僅供本模塊使用) ----
 const FOOD_SHORTAGE_TICKS = 24; // 存量低於此 tick 數的消耗量 → 視為將短缺
 const SURPLUS_RATIO = 0.85; // 存量超過倉容此比例 → 視為盈餘
-const ARMY_POPULATION_RATIO_CAP = 0.3; // 練兵至人口此比例為上限
 const MAX_TRAIN_PER_TICK = 50; // 單次最多練兵數
 const MAX_ACTIONS_PER_TICK = 3; // 每 tick 最多動作數上限
 const DEFAULT_ORDER_PRICE: Record<ResourceKind, number> = {

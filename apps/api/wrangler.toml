@@ -11,5 +11,9 @@ database_id = "00000000-0000-0000-0000-000000000000" # placeholder — 建立實
 [triggers]
 crons = ["0 * * * *"]
 
-# tick-cron handler(M8 stub)——resolveTick 整合、NPC 決策、單一 D1 batch 交易寫回,
-# 現階段 scheduled() 尚未實作,留給 M8。
+# tick-cron handler(M8 已實作)——src/index.ts 的 default export scheduled() 呼叫
+# src/tick/run.ts runTick():resolveTick 整合、NPC 決策(走與玩家 route 相同的
+# apps/api/src/game/actions.ts)、單一 D1 batch 交易寫回。
+#
+# POST /api/admin/season 需要 ADMIN_TOKEN——正式環境用
+# `wrangler secret put ADMIN_TOKEN` 設定,不寫入本檔(避免明碼進版控)。

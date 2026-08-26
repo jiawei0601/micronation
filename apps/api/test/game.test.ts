@@ -3,7 +3,7 @@
 // (vitest 預設保序執行,模擬玩家連續操作的真實序列)。
 
 import { describe, it, expect, beforeAll } from 'vitest';
-import app from '../src/index';
+import { app } from '../src/index';
 import { createTestD1 } from './support/sqliteD1Adapter';
 import { createSeason, findUserByEmail } from '../src/db/repository';
 import { makeWorld, makeRegion } from './support/fixtures';
@@ -334,6 +334,43 @@ describe('M7 api 全路由整合測試', () => {
       body: JSON.stringify({ marchId: march!.id }),
     }, env);
     expect(res.status).toBe(200);
+  });
+
+  it('23a POST /api/military/train 練兵成功(資源與人口徵兵上限皆足夠)', async () => {
+    const before = await app.request('/api/nation', { headers: { Cookie: cookie1 } }, env);
+    const beforeBody = await json<{ nation: { resources: { money: number }; army: { size: number } } }>(before);
+
+    const res = await app.request('/api/military/train', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie1 },
+      body: JSON.stringify({ size: 5 }),
+    }, env);
+    expect(res.status).toBe(200);
+    const body = await json<{ nation: { resources: { money: number }; army: { size: number } } }>(res);
+    expect(body.nation.army.size).toBe(beforeBody.nation.army.size + 5);
+    expect(body.nation.resources.money).toBe(beforeBody.nation.resources.money - 5 * 5); // TRAIN_COST_PER_UNIT.money = 5
+  });
+
+  it('23b POST /api/military/train 資源不足 → INSUFFICIENT_RESOURCES', async () => {
+    const res = await app.request('/api/military/train', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie1 },
+      body: JSON.stringify({ size: 100000 }),
+    }, env);
+    expect(res.status).toBe(400);
+    expect((await json<{ error: string }>(res)).error).toBe('INSUFFICIENT_RESOURCES');
+  });
+
+  it('23c POST /api/military/train 超過人口徵兵上限 → ARMY_CAP', async () => {
+    // population=100 × ARMY_POPULATION_RATIO_CAP(0.3) = 30 上限,army 經 23a 後為 15,
+    // 練 20 兵資源足夠(20×5=100 <<剩餘資源)但 15+20=35 超過上限應被拒絕。
+    const res = await app.request('/api/military/train', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie1 },
+      body: JSON.stringify({ size: 20 }),
+    }, env);
+    expect(res.status).toBe(400);
+    expect((await json<{ error: string }>(res)).error).toBe('ARMY_CAP');
   });
 
   it('24 提出條約 propose → active 尚未', async () => {

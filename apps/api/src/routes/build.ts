@@ -4,10 +4,10 @@
 
 import { Hono } from 'hono';
 import type { BuildingKind } from '@micronation/shared';
-import { BUILDING_LEVELS, BUILD_QUEUE_CAPACITY, MAX_BUILDING_LEVEL } from '@micronation/shared';
 import type { Env } from '../db/types';
 import { requireSession } from '../middleware/requireSession';
 import { loadActiveWorld, findOwnNation, persistWorld } from '../game/state';
+import { applyBuild } from '../game/actions';
 import { completeTask } from '../db/repository';
 
 const BUILDING_KINDS: BuildingKind[] = ['farm', 'mine', 'refinery', 'market', 'barracks', 'warehouse', 'university', 'wall'];
@@ -22,33 +22,15 @@ buildRoutes.post('/', requireSession, async (c) => {
 
   const world = await loadActiveWorld(c.env.DB);
   if (!world) return c.json({ error: 'NO_ACTIVE_SEASON' }, 400);
+  if (world.tickRunning) return c.json({ error: 'TICK_IN_PROGRESS' }, 503);
   const { state } = world;
   const nation = findOwnNation(state, user.id);
   if (!nation) return c.json({ error: 'NO_NATION' }, 404);
 
-  if (nation.buildQueue.length >= BUILD_QUEUE_CAPACITY) return c.json({ error: 'QUEUE_FULL' }, 400);
-
-  const level = nation.buildings[building] ?? 0;
-  if (level >= MAX_BUILDING_LEVEL) return c.json({ error: 'MAX_LEVEL' }, 400);
-
-  const spec = BUILDING_LEVELS[building][level];
-  for (const [k, v] of Object.entries(spec.cost)) {
-    if (nation.resources[k as keyof typeof nation.resources] < (v as number)) {
-      return c.json({ error: 'INSUFFICIENT_RESOURCES' }, 400);
-    }
-  }
-
-  const resources = { ...nation.resources };
-  for (const [k, v] of Object.entries(spec.cost)) {
-    resources[k as keyof typeof resources] -= v as number;
-  }
-
-  const updatedNation = {
-    ...nation,
-    resources,
-    buildQueue: [...nation.buildQueue, { building, completesAt: state.tick + spec.timeTicks }],
-  };
-  const next = { ...state, nations: state.nations.map((n) => (n.id === nation.id ? updatedNation : n)) };
+  const result = applyBuild(state, nation, building);
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  const next = result.value.state;
+  const updatedNation = findOwnNation(next, user.id)!;
 
   const now = Date.now();
   await persistWorld(c.env.DB, state, next, [], now);

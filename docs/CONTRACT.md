@@ -187,6 +187,10 @@ regionDistance(a: Region 索引, b): number   // 距離表在 shared/constants
 ```
 抵達後的戰鬥由 engine 在 resolveTick 內解算——military 只管合法性與排程。
 
+`POST /api/military/train`(M8 補遺,PRD user story 25):驗 session→ `applyTrain`(apps/api/src/game/actions.ts,
+NPC 與玩家共用)驗資源(TRAIN_COST_PER_UNIT)+徵兵上限(army.size ≤ population × ARMY_POPULATION_RATIO_CAP,
+shared 常數)→ army.size 累加→ persistWorld。不消耗行動點(比照 /api/build)。
+
 ## npc(packages/npc)
 
 ```ts

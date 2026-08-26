@@ -35,6 +35,7 @@ diplomacyRoutes.post('/propose', requireSession, async (c) => {
 
   const world = await loadActiveWorld(c.env.DB);
   if (!world) return c.json({ error: 'NO_ACTIVE_SEASON' }, 400);
+  if (world.tickRunning) return c.json({ error: 'TICK_IN_PROGRESS' }, 503);
   const { state } = world;
   const nation = findOwnNation(state, user.id);
   if (!nation) return c.json({ error: 'NO_NATION' }, 404);
@@ -62,6 +63,7 @@ diplomacyRoutes.post('/respond', requireSession, async (c) => {
 
   const world = await loadActiveWorld(c.env.DB);
   if (!world) return c.json({ error: 'NO_ACTIVE_SEASON' }, 400);
+  if (world.tickRunning) return c.json({ error: 'TICK_IN_PROGRESS' }, 503);
   const { state } = world;
   const nation = findOwnNation(state, user.id);
   if (!nation) return c.json({ error: 'NO_NATION' }, 404);
@@ -84,6 +86,7 @@ diplomacyRoutes.post('/breach', requireSession, async (c) => {
 
   const world = await loadActiveWorld(c.env.DB);
   if (!world) return c.json({ error: 'NO_ACTIVE_SEASON' }, 400);
+  if (world.tickRunning) return c.json({ error: 'TICK_IN_PROGRESS' }, 503);
   const { state } = world;
   const nation = findOwnNation(state, user.id);
   if (!nation) return c.json({ error: 'NO_NATION' }, 404);
