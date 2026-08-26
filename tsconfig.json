@@ -1,0 +1,13 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/shared" },
+    { "path": "packages/engine" },
+    { "path": "packages/market" },
+    { "path": "packages/diplomacy" },
+    { "path": "packages/military" },
+    { "path": "packages/npc" },
+    { "path": "apps/api" },
+    { "path": "apps/web" }
+  ]
+}

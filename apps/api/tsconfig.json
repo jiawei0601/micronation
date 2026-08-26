@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../../packages/shared" },
+    { "path": "../../packages/engine" },
+    { "path": "../../packages/market" },
+    { "path": "../../packages/diplomacy" },
+    { "path": "../../packages/military" },
+    { "path": "../../packages/npc" }
+  ]
+}
