@@ -9,14 +9,18 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@micronation/shared": "*",
+    "@micronation/diplomacy": "*",
     "@micronation/engine": "*",
     "@micronation/market": "*",
-    "@micronation/diplomacy": "*",
     "@micronation/military": "*",
-    "@micronation/npc": "*"
+    "@micronation/npc": "*",
+    "@micronation/shared": "*",
+    "hono": "^4.13.5"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^22.20.1",
+    "better-sqlite3": "^13.0.3",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
   }

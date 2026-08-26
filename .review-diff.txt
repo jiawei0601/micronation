@@ -1,0 +1,300 @@
+diff --git a/docs/CONTRACT.md b/docs/CONTRACT.md
+index fe746ab..4025cbc 100644
+--- a/docs/CONTRACT.md
++++ b/docs/CONTRACT.md
+@@ -37,6 +37,11 @@ interface Nation {
+ interface ScoreBreakdown { economy: number; warfare: number; tech: number; diplomacy: number; total: number; }
+ interface FlagSpec { layout: string; colors: string[]; emblem: string; }
+ interface Region { id: Id; name: string; bonuses: Partial<Record<ResourceKind, number>>; } // ±百分比
++// PublicRegion/PublicTreaty(三審 finding #6):PublicWorldView 內的巢狀可變欄位(Region.bonuses、
++// Treaty.terms)須額外標記深層 readonly——`Readonly<Region>`/`Readonly<Treaty>` 只讓頂層唯讀,
++// bonuses/terms 本身仍是可變物件、擋不住 view.regions[0].bonuses.food = 999 這類改動。
++// type PublicRegion = Readonly<Omit<Region,'bonuses'>> & { readonly bonuses: Readonly<Partial<Record<ResourceKind,number>>> };
++// type PublicTreaty = Readonly<Omit<Treaty,'terms'>> & { readonly terms: Readonly<TreatyTerms> };
+ interface WorldState {
+   seasonId: Id; tick: Tick;
+   regions: Region[]; nations: Nation[];
+@@ -61,14 +66,14 @@ interface PublicNation {
+ // PublicMarch — March 的受限投影(第二輪 finding #15)。只有出征雙方(viewer 為 attackerId
+ // 或 defenderId)才拿得到精確 size,其餘 viewer(含 null/匿名)只拿到概略級距 sizeTier,
+ // 不洩漏他國精確兵力(呼應 PublicNation.armySizeTier 的同一原則)。
+-interface PublicMarch {
+-  id: Id; attackerId: Id; defenderId: Id; departedAt: Tick; arrivesAt: Tick;
+-  size?: number;       // 僅 viewer 為 attacker/defender 時提供
+-  sizeTier?: ArmySizeTier; // viewer 非當事方時提供,取代精確 size
+-}
++// PublicMarch 用 union 強制 size/sizeTier 互斥(三審 finding #2/#5)——舊版兩者皆 optional,
++// 型別上允許「兩者同時有值」或「兩者都缺」這種語意錯誤狀態,編譯器攔不住。
++type PublicMarch = { id: Id; attackerId: Id; defenderId: Id; departedAt: Tick; arrivesAt: Tick } &
++  ( { size: number; sizeTier?: never }        // 僅 viewer 為 attacker/defender 時提供
++  | { size?: never; sizeTier: ArmySizeTier } ); // viewer 非當事方時提供,取代精確 size
+ interface PublicWorldView {
+-  seasonId: Id; tick: Tick; regions: Region[]; nations: PublicNation[];
+-  marches: PublicMarch[]; treaties: Treaty[]; orders: MarketOrder[];
++  seasonId: Id; tick: Tick; regions: PublicRegion[]; nations: PublicNation[];
++  marches: PublicMarch[]; treaties: PublicTreaty[]; orders: MarketOrder[];
+ }
+ ```
+ - `toPublicWorldView` 的每一層輸出皆為深拷貝(flag/colors/score/reputation/policies/region
+@@ -112,8 +117,9 @@ cancelOrder(book, orderId, nationId): Result<{book}>
+ //   直接跳過該筆(不成交,兩邊都留在 book),不是 Err(finding #11)。
+ // isPositiveInteger 用 Number.isSafeInteger(不是 Number.isInteger)(finding #12)。
+ // id 一律走 shared.makeId(prefix, ...parts) 純字串組合,不可用 Date.now/crypto
+-// 撮合候選(isMatch)須同時驗證 resting order 的 qty/price 為正安全整數,book 中若混入損壞資料
+-// 直接視為不可撮合對象跳過,不炸整個請求(第二輪 finding #6)。
++// 撮合候選(isMatch)須同時驗證 resting order 的 qty/price 為正安全整數、side 須 ∈ {'buy','sell'},
++// book 中若混入損壞資料(含 side 非法值)直接視為不可撮合對象跳過,不炸整個請求
++// (第二輪 finding #6,side 檢查為三審 finding #3——非法 side 可能被 !== o.side 誤判為對邊)。
+ // 成交前計算 notional = fillQty × tradePrice 與 tariff = round(notional × tariffRate),
+ // 任一非 Number.isSafeInteger(即使 qty/price 個別皆安全整數、僅乘積溢位)一律 Err('UNSAFE_NOTIONAL')
+ // (第二輪 finding #6/#9)。
+@@ -145,8 +151,10 @@ propose/respond/breach/expire → 純狀態轉移函式,輸入 Treaty[]+動作,
+ //   respond(action='counter') 驗證的是「既有 terms 與 counterTerms 合併後」的結果(`{...terms, ...counterTerms}`),
+ //   不是只驗 counterTerms 本身——否則「counter 把 duration 蓋成 undefined」這類案例會漏檢。
+ // propose/respond/breach/expire 的 tick 參數須為非負安全整數,否則 Err('INVALID_TICK')(第二輪 finding #3)。
+-// expire() 對每筆 active 條約額外要求 activatedAt/duration 皆為非負安全整數、且兩者相加不溢位安全整數
+-//   範圍,否則同樣回 Err('CORRUPTED_TREATY')(第二輪 finding #3,擴充原本只查「缺值」的檢查)。
++// expire() 對每筆 active 條約額外要求 activatedAt 為非負安全整數、duration 為正安全整數(duration===0
++//   視為資料損壞,而非「立即到期」——propose/respond 的 validateTerms 本就要求 duration>0,三審 finding #1)、
++//   且兩者相加不溢位安全整數範圍,否則同樣回 Err('CORRUPTED_TREATY')(第二輪 finding #3,擴充原本只查
++//   「缺值」的檢查)。
+ canAttack(treaties, attackerId, defenderId): { allowed: boolean; reason?: 'NAP'|'ALLIANCE' }
+ breachPenalty(treaty): { compensation: number; reputationDelta: number }
+ ```
+@@ -173,7 +181,8 @@ declareAttack(state-view, attackerId, defenderId, army, tick): Result<{ march: M
+ //   **不可**用 marches.filter(...).length 之類「現存筆數」推算(行軍抵達/撤回後筆數會下降,
+ //   重新出征可能拿到用過的序號、和歷史 march id 撞號)(第二輪 finding #4/#8,取代原 finding #21 的做法)。
+ //   declareAttack 回傳 { march, nextMarchSeq: seq + 1 },呼叫端(api 層)須把 nextMarchSeq 存回
+-//   WorldState.nextMarchSeq,下次呼叫時帶入。
++//   WorldState.nextMarchSeq,下次呼叫時帶入。seq+1 本身也須驗證是安全整數(三審 finding #4)——
++//   nextMarchSeq === Number.MAX_SAFE_INTEGER 時 seq+1 會溢位成不精確值,直接 Err('INVALID_MARCH_SEQ')。
+ regionDistance(a: Region 索引, b): number   // 距離表在 shared/constants
+ ```
+ 抵達後的戰鬥由 engine 在 resolveTick 內解算——military 只管合法性與排程。
+diff --git a/packages/diplomacy/src/index.test.ts b/packages/diplomacy/src/index.test.ts
+index a62d1ce..5abd17a 100644
+--- a/packages/diplomacy/src/index.test.ts
++++ b/packages/diplomacy/src/index.test.ts
+@@ -308,6 +308,13 @@ describe('propose/respond/breach/expire — tick 驗證(regression for Codex fin
+     ];
+     expect(expire(corrupted, 10)).toEqual({ ok: false, error: 'CORRUPTED_TREATY' });
+   });
++
++  it('expire 對 duration 為 0 的損壞資料回 CORRUPTED_TREATY(regression for Codex 三審 finding #1——0 代表資料損壞而非「立即到期」)', () => {
++    const corrupted: Treaty[] = [
++      { id: 't1', kind: 'nap', aId: A, bId: B, status: 'active', terms: { duration: 0, activatedAt: 5 }, createdAt: 0 },
++    ];
++    expect(expire(corrupted, 10)).toEqual({ ok: false, error: 'CORRUPTED_TREATY' });
++  });
+ });
+ 
+ describe('canAttack', () => {
+diff --git a/packages/diplomacy/src/index.ts b/packages/diplomacy/src/index.ts
+index 40672d7..e811375 100644
+--- a/packages/diplomacy/src/index.ts
++++ b/packages/diplomacy/src/index.ts
+@@ -206,8 +206,10 @@ export function expire(treaties: Treaty[], tick: Tick): Result<{ treaties: Treat
+   if (!isValidTick(tick)) return err('INVALID_TICK');
+ 
+   // 不變量:status === 'active' 的條約必有 terms.activatedAt(respond(accept) 必寫入),
+-  // 且 activatedAt/duration 皆須是非負安全整數、兩者相加不可溢位安全整數範圍——否則到期時間
+-  // 算出來會是垃圾值(finding #3)。任一被破壞,expire 整批回 Err,而非用 createdAt 猜測。
++  // 且 activatedAt 須為非負安全整數、duration 須為正安全整數(propose/respond 的 validateTerms
++  // 本就要求 duration>0,duration===0 代表資料損壞而非「立即到期」,第三輪 finding #1)、
++  // 兩者相加不可溢位安全整數範圍——否則到期時間算出來會是垃圾值(finding #3)。
++  // 任一被破壞,expire 整批回 Err,而非用 createdAt 猜測。
+   for (const t of treaties) {
+     if (t.status !== 'active') continue;
+     const { activatedAt, duration } = t.terms;
+@@ -215,7 +217,7 @@ export function expire(treaties: Treaty[], tick: Tick): Result<{ treaties: Treat
+       !Number.isSafeInteger(activatedAt) ||
+       (activatedAt as number) < 0 ||
+       !Number.isSafeInteger(duration) ||
+-      duration < 0 ||
++      duration <= 0 ||
+       !Number.isSafeInteger((activatedAt as number) + duration)
+     ) {
+       return err('CORRUPTED_TREATY');
+diff --git a/packages/market/src/index.ts b/packages/market/src/index.ts
+index 76d4381..383edd3 100644
+--- a/packages/market/src/index.ts
++++ b/packages/market/src/index.ts
+@@ -72,6 +72,8 @@ export function placeOrder(
+ 
+   const isMatch = (resting: MarketOrder): boolean =>
+     resting.kind === o.kind &&
++    (resting.side === 'buy' || resting.side === 'sell') && // resting.side 損壞資料防禦(三審 finding #3)——
++    // 非 'buy'/'sell' 的損壞值不得被 !== o.side 誤判為「對邊」而參與撮合
+     resting.side !== o.side &&
+     resting.nationId !== o.nationId && // 禁止自我對敲:同一國家的買賣單互相跳過,不成交
+     // resting order 的 qty/price 使用前同驗(finding #6)——book 若含損壞資料(理論上不該發生,
+diff --git a/packages/market/test/index.test.ts b/packages/market/test/index.test.ts
+index 329f94c..e9ecd75 100644
+--- a/packages/market/test/index.test.ts
++++ b/packages/market/test/index.test.ts
+@@ -170,6 +170,16 @@ describe('placeOrder — 撮合前 safe-integer 驗證(regression for Codex find
+     expect(r.value.trades).toHaveLength(1);
+     expect(r.value.trades[0].sellOrderId).toBe('healthy');
+   });
++
++  it('book 中混入 side 損壞(非 buy/sell)的 resting order 時,跳過該筆不撮合、不炸整個請求(regression for Codex 三審 finding #3)', () => {
++    const corrupted = restingOrder({ id: 'corrupted', side: 'bogus' as unknown as 'sell', qty: 5, price: 10 });
++    const healthy = restingOrder({ id: 'healthy', qty: 5, price: 10 });
++    const r = placeOrder([corrupted, healthy], newOrder({ qty: 5, price: 10 }), ref(), ctx(), NO_TARIFF, 0);
++    expect(r.ok).toBe(true);
++    if (!r.ok) return;
++    expect(r.value.trades).toHaveLength(1);
++    expect(r.value.trades[0].sellOrderId).toBe('healthy');
++  });
+ });
+ 
+ describe('placeOrder — id 唯一性(seq 避免撞號)', () => {
+diff --git a/packages/military/src/index.ts b/packages/military/src/index.ts
+index 0696acd..ba53ebb 100644
+--- a/packages/military/src/index.ts
++++ b/packages/military/src/index.ts
+@@ -99,6 +99,13 @@ export function declareAttack(
+     return err('INVALID_MARCH_SEQ');
+   }
+   const seq = stateView.nextMarchSeq;
++  // seq+1 本身也須落在安全整數範圍內(三審 finding #4)——seq === MAX_SAFE_INTEGER 時
++  // seq+1 會溢位成不精確值,回傳的 nextMarchSeq 存回 WorldState 後會產生垃圾序號,
++  // 之後所有 march id 都可能撞號。先算好再驗證,不安全就直接拒絕本次宣戰。
++  const nextSeq = seq + 1;
++  if (!Number.isSafeInteger(nextSeq)) {
++    return err('INVALID_MARCH_SEQ');
++  }
+   const march: March = {
+     id: makeId('march', attackerId, defenderId, tick, seq),
+     attackerId,
+@@ -108,7 +115,7 @@ export function declareAttack(
+     arrivesAt,
+   };
+ 
+-  return ok({ march, nextMarchSeq: seq + 1 });
++  return ok({ march, nextMarchSeq: nextSeq });
+ }
+ 
+ export function regionDistance(a: number, b: number): number {
+diff --git a/packages/military/test/index.test.ts b/packages/military/test/index.test.ts
+index db4acb2..ae436ef 100644
+--- a/packages/military/test/index.test.ts
++++ b/packages/military/test/index.test.ts
+@@ -299,6 +299,23 @@ describe('declareAttack', () => {
+     const state = makeState([attacker, defender], { nextMarchSeq: -1 });
+     expect(declareAttack(state, 'a', 'b', 10, 0)).toEqual({ ok: false, error: 'INVALID_MARCH_SEQ' });
+   });
++
++  it('nextMarchSeq 為 Number.MAX_SAFE_INTEGER 時 seq+1 會溢位,拒絕宣戰(regression for Codex 三審 finding #4)', () => {
++    const attacker = makeNation({ id: 'a', regionId: 'r0' });
++    const defender = makeNation({ id: 'b', regionId: 'r1' });
++    const state = makeState([attacker, defender], { nextMarchSeq: Number.MAX_SAFE_INTEGER });
++    expect(declareAttack(state, 'a', 'b', 10, 0)).toEqual({ ok: false, error: 'INVALID_MARCH_SEQ' });
++  });
++
++  it('nextMarchSeq 為 Number.MAX_SAFE_INTEGER - 1 時 seq+1 仍是安全整數,正常放行', () => {
++    const attacker = makeNation({ id: 'a', regionId: 'r0' });
++    const defender = makeNation({ id: 'b', regionId: 'r1' });
++    const state = makeState([attacker, defender], { nextMarchSeq: Number.MAX_SAFE_INTEGER - 1 });
++    const r = declareAttack(state, 'a', 'b', 10, 0);
++    expect(r.ok).toBe(true);
++    if (!r.ok) return;
++    expect(r.value.nextMarchSeq).toBe(Number.MAX_SAFE_INTEGER);
++  });
+ });
+ 
+ describe('marchTime / regionDistance', () => {
+diff --git a/packages/shared/src/types.ts b/packages/shared/src/types.ts
+index 6707d0a..650e25a 100644
+--- a/packages/shared/src/types.ts
++++ b/packages/shared/src/types.ts
+@@ -209,29 +209,51 @@ export interface PublicNation {
+   readonly policies: Readonly<Policies>;
+ }
+ 
+-/**
+- * March 的受限投影(finding #15)——只有出征雙方(viewer 為 attackerId 或 defenderId)
+- * 才看得到精確 size,其餘 viewer 只拿到概略級距 sizeTier,不洩漏他國精確兵力。
+- */
+-export interface PublicMarch {
++interface PublicMarchBase {
+   readonly id: Id;
+   readonly attackerId: Id;
+   readonly defenderId: Id;
+   readonly departedAt: Tick;
+   readonly arrivesAt: Tick;
+-  /** 僅 viewer 為 attacker/defender 時提供 */
+-  readonly size?: number;
+-  /** viewer 非當事方時提供,取代精確 size */
+-  readonly sizeTier?: ArmySizeTier;
+ }
+ 
++/**
++ * March 的受限投影(finding #15)——只有出征雙方(viewer 為 attackerId 或 defenderId)
++ * 才看得到精確 size,其餘 viewer 只拿到概略級距 sizeTier,不洩漏他國精確兵力。
++ * 用 union 強制兩者互斥(三審 finding #2/#5)——舊版把 size?/sizeTier? 都設成 optional,
++ * 型別上allow「兩者同時有值」或「兩者都缺」這種語意錯誤的狀態,編譯器攔不住;
++ * 改成 union 後,取得 size 的分支型別上就不可能同時帶 sizeTier,反之亦然。
++ */
++export type PublicMarch = PublicMarchBase &
++  (
++    | { readonly size: number; readonly sizeTier?: never }
++    | { readonly size?: never; readonly sizeTier: ArmySizeTier }
++  );
++
++/**
++ * Region 的唯讀投影(三審 finding #6)——`Readonly<Region>` 只讓頂層欄位唯讀,
++ * `bonuses` 本身仍是可變的 `Partial<Record<ResourceKind, number>>` 物件,呼叫端拿到
++ * view 後仍可 `view.regions[0].bonuses.food = 999` 改到投影內部;巢狀欄位需另外標記唯讀。
++ */
++export type PublicRegion = Readonly<Omit<Region, 'bonuses'>> & {
++  readonly bonuses: Readonly<Partial<Record<ResourceKind, number>>>;
++};
++
++/**
++ * Treaty 的唯讀投影(三審 finding #6)——同上,`terms` 是巢狀可變物件,`Readonly<Treaty>`
++ * 頂層唯讀擋不住 `view.treaties[0].terms.duration = 0` 這類改動。
++ */
++export type PublicTreaty = Readonly<Omit<Treaty, 'terms'>> & {
++  readonly terms: Readonly<TreatyTerms>;
++};
++
+ export interface PublicWorldView {
+   readonly seasonId: Id;
+   readonly tick: Tick;
+-  readonly regions: readonly Readonly<Region>[];
++  readonly regions: readonly PublicRegion[];
+   readonly nations: readonly PublicNation[];
+   readonly marches: readonly PublicMarch[];
+-  readonly treaties: readonly Readonly<Treaty>[];
++  readonly treaties: readonly PublicTreaty[];
+   readonly orders: readonly Readonly<MarketOrder>[];
+ }
+ 
+diff --git a/packages/shared/src/view.ts b/packages/shared/src/view.ts
+index 16a9230..38c9e1c 100644
+--- a/packages/shared/src/view.ts
++++ b/packages/shared/src/view.ts
+@@ -3,6 +3,8 @@ import type {
+   PublicWorldView,
+   PublicNation,
+   PublicMarch,
++  PublicRegion,
++  PublicTreaty,
+   Nation,
+   Region,
+   Treaty,
+@@ -48,11 +50,11 @@ function toPublicNation(n: Nation): PublicNation {
+   };
+ }
+ 
+-function toPublicRegion(r: Region): Region {
++function toPublicRegion(r: Region): PublicRegion {
+   return { id: r.id, name: r.name, bonuses: { ...r.bonuses } };
+ }
+ 
+-function toPublicTreaty(t: Treaty): Treaty {
++function toPublicTreaty(t: Treaty): PublicTreaty {
+   return { ...t, terms: { ...t.terms } };
+ }
+ 

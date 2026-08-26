@@ -1,0 +1,15 @@
+name = "micronation-api"
+main = "src/index.ts"
+compatibility_date = "2026-08-26"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "micronation-db"
+database_id = "00000000-0000-0000-0000-000000000000" # placeholder — 建立實體 D1 後由 `wrangler d1 create` 覆蓋
+
+[triggers]
+crons = ["0 * * * *"]
+
+# tick-cron handler(M8 stub)——resolveTick 整合、NPC 決策、單一 D1 batch 交易寫回,
+# 現階段 scheduled() 尚未實作,留給 M8。
