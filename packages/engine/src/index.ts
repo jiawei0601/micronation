@@ -98,10 +98,13 @@ export function resolveTick(state: WorldState, seed: string): { state: WorldStat
 
     // 戰功計算必須用「實際算出的 power」(含 tech/morale/rng 修正),不是原始兵力數字,
     // 否則同兵力不同科技/士氣的國家會拿到一樣的戰功,失去「勝強敵多」的意義。
+    // 直接傳 resolveBattle 算出的原始 power(可能為 0 或極小值)——warfareGainForBattle
+    // 已對 ownPower<=0 與比值做防禦性處理,不需要在這裡用 `|| 1` 造假,那會讓 0 或極小 power
+    // 被硬性拉成 1,扭曲戰功比例計算(finding #1)。
     const battleForScore = (isAttacker: boolean): BattleOutcomeForScore => ({
       won: isAttacker ? result.attackerWins : !result.attackerWins,
-      ownPower: isAttacker ? result.attackerPower || 1 : result.defenderPower || 1,
-      opponentPower: isAttacker ? result.defenderPower || 1 : result.attackerPower || 1,
+      ownPower: isAttacker ? result.attackerPower : result.defenderPower,
+      opponentPower: isAttacker ? result.defenderPower : result.attackerPower,
       opponentIsNpc: isAttacker ? defender.ownerId === null : attacker.ownerId === null,
     });
     battlesByNation.set(attacker.id, [...(battlesByNation.get(attacker.id) ?? []), battleForScore(true)]);

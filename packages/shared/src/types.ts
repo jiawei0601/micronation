@@ -170,6 +170,13 @@ export interface WorldState {
   marches: March[];
   treaties: Treaty[];
   orders: MarketOrder[];
+  /**
+   * 呼叫端維護的單調遞增行軍序號,供 military.declareAttack 組 March id 用(finding #4/#8)。
+   * 不可用 marches.filter(...).length 之類「現存筆數」推算——行軍抵達/撤回後筆數會下降,
+   * 重新出征時可能拿到用過的序號,和歷史(含已從 marches 移除但仍存在 D1/事件紀錄裡)的
+   * March id 撞號。declareAttack 純函式回傳遞增後的下一個值,由呼叫端(api 層)負責持久化。
+   */
+  nextMarchSeq: number;
 }
 
 export interface GameEvent {
@@ -187,28 +194,45 @@ export type ArmySizeTier = 'none' | 'small' | 'medium' | 'large' | 'huge';
  * 只暴露公開欄位:id/ownerId/name/flag/regionId/score/reputation/army 規模概略(armySizeTier)/
  * protectedUntil/policies(政策依 PRD 為公開資訊,故保留)。不含 resources/actionPoints/
  * buildQueue/lastAttackedAt 等私密細節。透過 `toPublicWorldView(state, viewerId)` 產生。
+ * 巢狀可變結構(flag/colors/score/reputation/policies)一律 readonly,防止呼叫端誤改。
  */
 export interface PublicNation {
-  id: Id;
-  ownerId: Id | null;
-  name: string;
-  flag: FlagSpec;
-  regionId: Id;
-  score: ScoreBreakdown;
-  reputation: { breaches: number };
-  armySizeTier: ArmySizeTier;
-  protectedUntil: Tick;
-  policies: Policies;
+  readonly id: Id;
+  readonly ownerId: Id | null;
+  readonly name: string;
+  readonly flag: Readonly<FlagSpec> & { readonly colors: readonly string[] };
+  readonly regionId: Id;
+  readonly score: Readonly<ScoreBreakdown>;
+  readonly reputation: { readonly breaches: number };
+  readonly armySizeTier: ArmySizeTier;
+  readonly protectedUntil: Tick;
+  readonly policies: Readonly<Policies>;
+}
+
+/**
+ * March 的受限投影(finding #15)——只有出征雙方(viewer 為 attackerId 或 defenderId)
+ * 才看得到精確 size,其餘 viewer 只拿到概略級距 sizeTier,不洩漏他國精確兵力。
+ */
+export interface PublicMarch {
+  readonly id: Id;
+  readonly attackerId: Id;
+  readonly defenderId: Id;
+  readonly departedAt: Tick;
+  readonly arrivesAt: Tick;
+  /** 僅 viewer 為 attacker/defender 時提供 */
+  readonly size?: number;
+  /** viewer 非當事方時提供,取代精確 size */
+  readonly sizeTier?: ArmySizeTier;
 }
 
 export interface PublicWorldView {
-  seasonId: Id;
-  tick: Tick;
-  regions: Region[];
-  nations: PublicNation[];
-  marches: March[];
-  treaties: Treaty[];
-  orders: MarketOrder[];
+  readonly seasonId: Id;
+  readonly tick: Tick;
+  readonly regions: readonly Readonly<Region>[];
+  readonly nations: readonly PublicNation[];
+  readonly marches: readonly PublicMarch[];
+  readonly treaties: readonly Readonly<Treaty>[];
+  readonly orders: readonly Readonly<MarketOrder>[];
 }
 
 // NpcAction — 與玩家 API 同語意的指令聯集

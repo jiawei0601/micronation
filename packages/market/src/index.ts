@@ -74,6 +74,10 @@ export function placeOrder(
     resting.kind === o.kind &&
     resting.side !== o.side &&
     resting.nationId !== o.nationId && // 禁止自我對敲:同一國家的買賣單互相跳過,不成交
+    // resting order 的 qty/price 使用前同驗(finding #6)——book 若含損壞資料(理論上不該發生,
+    // 但防禦性處理),直接視為不可撮合對象跳過,不炸整個請求。
+    isPositiveInteger(resting.qty) &&
+    isPositiveInteger(resting.price) &&
     (o.side === 'buy' ? resting.price <= o.price : resting.price >= o.price);
 
   // 候選:同 kind、對邊、價格符合;排序=價格優先(對 taker 最有利者優先)→時間優先(createdAt 早者優先)
@@ -95,6 +99,13 @@ export function placeOrder(
     const fillQty = Math.min(remaining, resting.qty);
     const tradePrice = resting.price; // 吃單方成交於掛單方(maker)價格
 
+    // 成交前算 notional 與 tariff,個別安全但乘積可能不安全(finding #6/#9)——
+    // 非 Number.isSafeInteger 即拒絕整筆請求,不做部分撮合後再失敗那種半吊子狀態。
+    const notional = fillQty * tradePrice;
+    if (!Number.isSafeInteger(notional)) return err('UNSAFE_NOTIONAL');
+    const tariff = Math.round(notional * tariffRate);
+    if (!Number.isSafeInteger(tariff)) return err('UNSAFE_NOTIONAL');
+
     const buyOrderId = o.side === 'buy' ? takerId : resting.id;
     const sellOrderId = o.side === 'buy' ? resting.id : takerId;
     const buyerId = o.side === 'buy' ? o.nationId : resting.nationId;
@@ -109,7 +120,7 @@ export function placeOrder(
       kind: o.kind,
       qty: fillQty,
       price: tradePrice,
-      tariff: Math.round(fillQty * tradePrice * tariffRate),
+      tariff,
       tick: ctx.tick,
     });
 

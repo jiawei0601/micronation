@@ -107,7 +107,11 @@ function wasAttacked(nation: Nation, view: PublicWorldView): boolean {
   // 不再只看 view.marches:行軍一旦抵達就會從 WorldState.marches 移除,只看在途行軍
   // 會漏掉「剛被打完、行軍已消失」的情況,導致該練兵時沒練兵。
   if (nation.lastAttackedAt === undefined) return false;
-  return view.tick - nation.lastAttackedAt <= WAS_ATTACKED_RECENT_TICKS;
+  const elapsed = view.tick - nation.lastAttackedAt;
+  // lastAttackedAt 若是損壞資料指向未來(> view.tick),elapsed 會是負值——沒有守衛的話
+  // 「負值 <= 48」恆真,反而被誤判為「近期被攻擊過」。elapsed 須是非負安全整數且落在窗口內
+  // 才算數(finding #11)。
+  return Number.isSafeInteger(elapsed) && elapsed >= 0 && elapsed <= WAS_ATTACKED_RECENT_TICKS;
 }
 
 /** 依序評估四條規則,回傳本 tick 要執行的 NpcAction 清單(不超過 MAX_ACTIONS_PER_TICK)。 */
@@ -189,8 +193,10 @@ export function decideActions(nation: Nation, view: PublicWorldView, seed: strin
     }
   }
 
-  // ④ 否則 → 依短板升級對應建築(佇列有空位才排)
-  if (actions.length < MAX_ACTIONS_PER_TICK && queueHasRoom(plannedQueueLen)) {
+  // ④ 否則 → 依短板升級對應建築(佇列有空位才排)。
+  // CONTRACT「否則」語意:只在規則①②③本 tick 都沒有產生任何動作時才執行,不是「還有動作額度就
+  // 順便塞一個」——後者會讓④和①②③同時發生,失去「否則」的互斥語意(finding #10)。
+  if (actions.length === 0 && queueHasRoom(plannedQueueLen)) {
     const tracked: ResourceKind[] = ['food', 'ore', 'fuel'];
     let weakest: ResourceKind | null = null;
     let weakestStock = Infinity;

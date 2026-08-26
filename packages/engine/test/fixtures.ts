@@ -62,6 +62,7 @@ export function makeWorld(overrides: Partial<WorldState> = {}): WorldState {
     marches: [],
     treaties: [],
     orders: [],
+    nextMarchSeq: 0,
     ...overrides,
   };
 }

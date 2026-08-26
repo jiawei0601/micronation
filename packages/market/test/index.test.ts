@@ -127,6 +127,51 @@ describe('placeOrder — 驗證', () => {
   });
 });
 
+describe('placeOrder — 撮合前 safe-integer 驗證(regression for Codex finding #6/#9)', () => {
+  it('拒絕 NaN/Infinity/小數的 qty 或 price', () => {
+    expect(placeOrder([], newOrder({ qty: NaN }), ref(), ctx(), NO_TARIFF, 0)).toEqual({ ok: false, error: 'INVALID_ORDER' });
+    expect(placeOrder([], newOrder({ qty: Infinity }), ref(), ctx(), NO_TARIFF, 0)).toEqual({ ok: false, error: 'INVALID_ORDER' });
+    expect(placeOrder([], newOrder({ qty: 1.5 }), ref(), ctx(), NO_TARIFF, 0)).toEqual({ ok: false, error: 'INVALID_ORDER' });
+    expect(placeOrder([], newOrder({ price: NaN }), ref(), ctx(), NO_TARIFF, 0)).toEqual({ ok: false, error: 'INVALID_ORDER' });
+    expect(placeOrder([], newOrder({ price: Infinity }), ref(), ctx(), NO_TARIFF, 0)).toEqual({ ok: false, error: 'INVALID_ORDER' });
+    expect(placeOrder([], newOrder({ price: 2.5 }), ref(), ctx(), NO_TARIFF, 0)).toEqual({ ok: false, error: 'INVALID_ORDER' });
+  });
+
+  it('拒絕超過 MAX_SAFE_INTEGER 的 qty/price', () => {
+    const over = Number.MAX_SAFE_INTEGER + 10;
+    expect(placeOrder([], newOrder({ qty: over }), ref(), ctx(), NO_TARIFF, 0)).toEqual({ ok: false, error: 'INVALID_ORDER' });
+    expect(placeOrder([], newOrder({ price: over }), ref({ food: over / 2 }), ctx(), NO_TARIFF, 0)).toEqual({
+      ok: false,
+      error: 'INVALID_ORDER',
+    });
+  });
+
+  it('qty 與 price 個別皆安全整數,但乘積(notional)超出安全整數範圍 → UNSAFE_NOTIONAL', () => {
+    // 個別都遠小於 MAX_SAFE_INTEGER,但相乘後溢位。
+    const big = 100_000_000; // 1e8,安全整數
+    const book = [restingOrder({ id: 'sell-big', qty: big, price: big })];
+    const r = placeOrder(
+      book,
+      newOrder({ qty: big, price: big }),
+      { avgPrice: { food: big } },
+      ctx(),
+      NO_TARIFF,
+      0
+    );
+    expect(r).toEqual({ ok: false, error: 'UNSAFE_NOTIONAL' });
+  });
+
+  it('book 中混入非安全整數 qty/price 的損壞 resting order 時,跳過該筆不撮合、不炸整個請求', () => {
+    const corrupted = restingOrder({ id: 'corrupted', qty: NaN as unknown as number, price: 10 });
+    const healthy = restingOrder({ id: 'healthy', qty: 5, price: 10 });
+    const r = placeOrder([corrupted, healthy], newOrder({ qty: 5, price: 10 }), ref(), ctx(), NO_TARIFF, 0);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.trades).toHaveLength(1);
+    expect(r.value.trades[0].sellOrderId).toBe('healthy');
+  });
+});
+
 describe('placeOrder — id 唯一性(seq 避免撞號)', () => {
   it('相同 book.length(空 book)但不同 seq 產生不同 order id,避免用 book.length 當序號時的撞號', () => {
     const r1 = placeOrder([], newOrder({ nationId: 'nationA' }), ref(), ctx(), NO_TARIFF, 0);

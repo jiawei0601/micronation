@@ -50,6 +50,7 @@ function makeState(nations: Nation[], overrides: Partial<WorldState> = {}): Worl
     marches: [],
     treaties: [],
     orders: [],
+    nextMarchSeq: 0,
     ...overrides,
   };
 }
@@ -170,9 +171,10 @@ describe('declareAttack', () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const distance = regionDistanceByIndex(0, 2);
-      expect(result.value.arrivesAt).toBe(tick + marchTime(distance));
-      expect(result.value.departedAt).toBe(tick);
-      expect(result.value.size).toBe(10);
+      expect(result.value.march.arrivesAt).toBe(tick + marchTime(distance));
+      expect(result.value.march.departedAt).toBe(tick);
+      expect(result.value.march.size).toBe(10);
+      expect(result.value.nextMarchSeq).toBe(1);
     }
   });
 
@@ -231,7 +233,7 @@ describe('declareAttack', () => {
     expect(declareAttack(state, 'a', 'b', 90, 10).ok).toBe(true);
   });
 
-  it('march ids get a sequence component so two marches departing the same tick never collide', () => {
+  it('march ids use the monotonic nextMarchSeq so two marches departing the same tick never collide (regression for Codex finding #4/#8/#12)', () => {
     const attacker = makeNation({ id: 'a', regionId: 'r0', army: { size: 100 } });
     const other = makeNation({ id: 'c', regionId: 'r0', army: { size: 100 } });
     const defender = makeNation({ id: 'b', regionId: 'r1' });
@@ -239,11 +241,63 @@ describe('declareAttack', () => {
     const r1 = declareAttack(state, 'a', 'b', 5, 0);
     expect(r1.ok).toBe(true);
     if (!r1.ok) return;
-    const stateWithMarch = { ...state, marches: [r1.value] };
+    expect(r1.value.nextMarchSeq).toBe(1);
+
+    // 呼叫端持久化 nextMarchSeq 並帶入下一次呼叫
+    const stateWithMarch = { ...state, marches: [r1.value.march], nextMarchSeq: r1.value.nextMarchSeq };
     const r2 = declareAttack(stateWithMarch, 'c', 'b', 5, 0);
     expect(r2.ok).toBe(true);
     if (!r2.ok) return;
-    expect(r1.value.id).not.toBe(r2.value.id);
+    expect(r1.value.march.id).not.toBe(r2.value.march.id);
+    expect(r2.value.nextMarchSeq).toBe(2);
+  });
+
+  it('撤回第一筆行軍後同 tick 再宣戰,新 march id 仍與歷來所有 id 不同(nextMarchSeq 不因筆數減少而倒退)', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'r0', army: { size: 100 } });
+    const defender = makeNation({ id: 'b', regionId: 'r1' });
+    const state = makeState([attacker, defender]);
+
+    const r1 = declareAttack(state, 'a', 'b', 5, 0);
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    const firstMarchId = r1.value.march.id;
+
+    // 撤回:marches 變回空陣列(若序號跟著「現存筆數」走,會誤以為又能從 0 開始編號),
+    // 但 nextMarchSeq 是呼叫端持久化的獨立計數器,不受 marches 陣列筆數影響。
+    const recalled = recallMarch([r1.value.march], firstMarchId, 'a', 0);
+    expect(recalled.ok).toBe(true);
+    if (!recalled.ok) return;
+
+    const stateAfterRecall = { ...state, marches: recalled.value.marches, nextMarchSeq: r1.value.nextMarchSeq };
+    const r2 = declareAttack(stateAfterRecall, 'a', 'b', 5, 0);
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+
+    expect(r2.value.march.id).not.toBe(firstMarchId);
+  });
+
+  it('拒絕 stateView.tick 為非負安全整數以外的值(regression for Codex finding #7)', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'r0' });
+    const defender = makeNation({ id: 'b', regionId: 'r1' });
+    expect(declareAttack(makeState([attacker, defender], { tick: -1 }), 'a', 'b', 10, -1)).toEqual({
+      ok: false,
+      error: 'INVALID_TICK',
+    });
+    expect(declareAttack(makeState([attacker, defender], { tick: NaN }), 'a', 'b', 10, NaN)).toEqual({
+      ok: false,
+      error: 'INVALID_TICK',
+    });
+    expect(declareAttack(makeState([attacker, defender], { tick: 1.5 }), 'a', 'b', 10, 1.5)).toEqual({
+      ok: false,
+      error: 'INVALID_TICK',
+    });
+  });
+
+  it('拒絕非負安全整數以外的 nextMarchSeq(損壞資料)', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'r0' });
+    const defender = makeNation({ id: 'b', regionId: 'r1' });
+    const state = makeState([attacker, defender], { nextMarchSeq: -1 });
+    expect(declareAttack(state, 'a', 'b', 10, 0)).toEqual({ ok: false, error: 'INVALID_MARCH_SEQ' });
   });
 });
 

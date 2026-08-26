@@ -215,6 +215,101 @@ describe('expire', () => {
   });
 });
 
+describe('validateTerms — 非法 terms table-driven(regression for Codex finding #5/#2)', () => {
+  const cases: { name: string; kind: Parameters<typeof propose>[2]; terms: Record<string, unknown> }[] = [
+    { name: 'duration 缺失', kind: 'nap', terms: {} },
+    { name: 'duration 為 0', kind: 'nap', terms: { duration: 0 } },
+    { name: 'duration 為小數', kind: 'nap', terms: { duration: 1.5 } },
+    { name: 'duration 為 NaN', kind: 'nap', terms: { duration: NaN } },
+    { name: 'duration 為 Infinity', kind: 'nap', terms: { duration: Infinity } },
+    { name: 'duration 非安全整數(超出 MAX_SAFE_INTEGER)', kind: 'nap', terms: { duration: Number.MAX_SAFE_INTEGER + 10 } },
+    { name: 'compensation 為負', kind: 'nap', terms: { duration: 10, compensation: -1 } },
+    { name: 'compensation 非有限(Infinity)', kind: 'nap', terms: { duration: 10, compensation: Infinity } },
+    { name: 'compensation 非有限(NaN)', kind: 'nap', terms: { duration: 10, compensation: NaN } },
+    { name: 'tariffDiscount 超出上界', kind: 'trade', terms: { duration: 10, tariffDiscount: 1.1 } },
+    { name: 'tariffDiscount 低於下界', kind: 'trade', terms: { duration: 10, tariffDiscount: -0.1 } },
+    { name: 'tariffDiscount 用在非 trade(kind 不相容)', kind: 'nap', terms: { duration: 10, tariffDiscount: 0.5 } },
+    { name: 'allianceDefense 用在非 alliance(kind 不相容)', kind: 'nap', terms: { duration: 10, allianceDefense: true } },
+    { name: 'allianceDefense 非 boolean', kind: 'alliance', terms: { duration: 10, allianceDefense: 'yes' } },
+  ];
+
+  for (const c of cases) {
+    it(`propose 拒絕:${c.name}`, () => {
+      const before: Treaty[] = [];
+      const res = propose(before, 't1', c.kind, A, B, c.terms as never, 0);
+      expect(res).toEqual({ ok: false, error: 'INVALID_TERMS' });
+      // 輸入未被改動
+      expect(before).toEqual([]);
+    });
+  }
+
+  it('respond(counter) 把既有合法 duration 蓋成 undefined → INVALID_TERMS,且原條約不變', () => {
+    const p = propose([], 't1', 'nap', A, B, terms({ duration: 10 }), 0);
+    if (!p.ok) throw new Error('setup failed');
+    const before = p.value.treaties;
+    const res = respond(before, 't1', B, 'counter', 1, { duration: undefined as unknown as number });
+    expect(res).toEqual({ ok: false, error: 'INVALID_TERMS' });
+    expect(before[0].terms.duration).toBe(10);
+  });
+
+  it('respond(counter) compensation 為負 → INVALID_TERMS', () => {
+    const p = propose([], 't1', 'nap', A, B, terms(), 0);
+    if (!p.ok) throw new Error('setup failed');
+    const res = respond(p.value.treaties, 't1', B, 'counter', 1, { compensation: -5 });
+    expect(res).toEqual({ ok: false, error: 'INVALID_TERMS' });
+  });
+});
+
+describe('propose/respond/breach/expire — tick 驗證(regression for Codex finding #3)', () => {
+  it('propose 拒絕負數/小數/NaN/Infinity 的 tick', () => {
+    expect(propose([], 't1', 'nap', A, B, terms(), -1)).toEqual({ ok: false, error: 'INVALID_TICK' });
+    expect(propose([], 't1', 'nap', A, B, terms(), 1.5)).toEqual({ ok: false, error: 'INVALID_TICK' });
+    expect(propose([], 't1', 'nap', A, B, terms(), NaN)).toEqual({ ok: false, error: 'INVALID_TICK' });
+    expect(propose([], 't1', 'nap', A, B, terms(), Infinity)).toEqual({ ok: false, error: 'INVALID_TICK' });
+  });
+
+  it('respond 拒絕非法 tick', () => {
+    const p = propose([], 't1', 'nap', A, B, terms(), 0);
+    if (!p.ok) throw new Error('setup failed');
+    expect(respond(p.value.treaties, 't1', B, 'accept', -1)).toEqual({ ok: false, error: 'INVALID_TICK' });
+  });
+
+  it('breach 拒絕非法 tick', () => {
+    const p = propose([], 't1', 'alliance', A, B, terms({ allianceDefense: true }), 0);
+    if (!p.ok) throw new Error('setup failed');
+    const a = respond(p.value.treaties, 't1', B, 'accept', 1);
+    if (!a.ok) throw new Error('setup failed');
+    expect(breach(a.value.treaties, 't1', A, NaN)).toEqual({ ok: false, error: 'INVALID_TICK' });
+  });
+
+  it('expire 拒絕非法 tick', () => {
+    expect(expire([], -1)).toEqual({ ok: false, error: 'INVALID_TICK' });
+    expect(expire([], 1.5)).toEqual({ ok: false, error: 'INVALID_TICK' });
+  });
+
+  it('expire 對 activatedAt/duration 相加會溢出安全整數範圍的損壞資料回 CORRUPTED_TREATY', () => {
+    const corrupted: Treaty[] = [
+      {
+        id: 't1',
+        kind: 'nap',
+        aId: A,
+        bId: B,
+        status: 'active',
+        terms: { duration: Number.MAX_SAFE_INTEGER, activatedAt: Number.MAX_SAFE_INTEGER },
+        createdAt: 0,
+      },
+    ];
+    expect(expire(corrupted, 10)).toEqual({ ok: false, error: 'CORRUPTED_TREATY' });
+  });
+
+  it('expire 對 activatedAt 為負的損壞資料回 CORRUPTED_TREATY', () => {
+    const corrupted: Treaty[] = [
+      { id: 't1', kind: 'nap', aId: A, bId: B, status: 'active', terms: { duration: 5, activatedAt: -1 }, createdAt: 0 },
+    ];
+    expect(expire(corrupted, 10)).toEqual({ ok: false, error: 'CORRUPTED_TREATY' });
+  });
+});
+
 describe('canAttack', () => {
   it('allows attack when no treaty exists', () => {
     expect(canAttack([], A, B)).toEqual({ allowed: true });

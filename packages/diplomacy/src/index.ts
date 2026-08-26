@@ -26,15 +26,36 @@ function involvesPair(t: Treaty, x: Id, y: Id): boolean {
   return (t.aId === x && t.bId === y) || (t.aId === y && t.bId === x);
 }
 
-/** duration 必為正整數;compensation 若提供須 >=0;tariffDiscount 若提供須落在 0~1。 */
-function invalidTerms(terms: Partial<TreatyTerms>): boolean {
-  if (terms.duration !== undefined && (!Number.isSafeInteger(terms.duration) || terms.duration <= 0)) return true;
-  if (terms.compensation !== undefined && (!Number.isFinite(terms.compensation) || terms.compensation < 0)) return true;
-  if (
-    terms.tariffDiscount !== undefined &&
-    (!Number.isFinite(terms.tariffDiscount) || terms.tariffDiscount < 0 || terms.tariffDiscount > 1)
-  ) {
-    return true;
+function isValidTick(tick: unknown): tick is Tick {
+  return typeof tick === 'number' && Number.isSafeInteger(tick) && tick >= 0;
+}
+
+/**
+ * 驗證 terms(finding #2/#15):
+ * - duration:requireDuration 為 true,或 terms.duration 有提供時,必為正安全整數(NaN/Infinity/0/負/小數/缺值皆非法)。
+ * - compensation(若提供):須為有限數且 >=0。
+ * - allianceDefense(若提供):kind 必為 'alliance' 且型別為 boolean,否則視為不相容欄位。
+ * - tariffDiscount(若提供):kind 必為 'trade' 且為有限數、落在 [0,1],否則視為不相容欄位。
+ */
+function validateTerms(kind: TreatyKind, terms: Partial<TreatyTerms>, requireDuration: boolean): boolean {
+  if (requireDuration || terms.duration !== undefined) {
+    if (!Number.isSafeInteger(terms.duration) || (terms.duration as number) <= 0) return true;
+  }
+  if (terms.compensation !== undefined) {
+    if (!Number.isFinite(terms.compensation) || terms.compensation < 0) return true;
+  }
+  if (terms.allianceDefense !== undefined) {
+    if (kind !== 'alliance' || typeof terms.allianceDefense !== 'boolean') return true;
+  }
+  if (terms.tariffDiscount !== undefined) {
+    if (
+      kind !== 'trade' ||
+      !Number.isFinite(terms.tariffDiscount) ||
+      terms.tariffDiscount < 0 ||
+      terms.tariffDiscount > 1
+    ) {
+      return true;
+    }
   }
   return false;
 }
@@ -50,8 +71,9 @@ export function propose(
   terms: TreatyTerms,
   tick: Tick
 ): Result<{ treaties: Treaty[]; events: GameEvent[] }> {
+  if (!isValidTick(tick)) return err('INVALID_TICK');
   if (aId === bId) return err('SELF_TREATY');
-  if (invalidTerms(terms)) return err('INVALID_TERMS');
+  if (validateTerms(kind, terms, true)) return err('INVALID_TERMS');
   if (treaties.some((t) => t.id === id)) return err('DUPLICATE_ID');
 
   const duplicate = treaties.some(
@@ -93,6 +115,7 @@ export function respond(
   tick: Tick,
   counterTerms?: Partial<TreatyTerms>
 ): Result<{ treaties: Treaty[]; events: GameEvent[] }> {
+  if (!isValidTick(tick)) return err('INVALID_TICK');
   if (action !== 'accept' && action !== 'reject' && action !== 'counter') return err('INVALID_ACTION');
 
   const idx = treaties.findIndex((t) => t.id === treatyId);
@@ -106,7 +129,13 @@ export function respond(
   const pending = terms.pendingResponderId ?? treaty.bId;
   if (responderId !== pending) return err('NOT_PENDING_PARTY');
 
-  if (action === 'counter' && counterTerms && invalidTerms(counterTerms)) return err('INVALID_TERMS');
+  // counter 的合法性須以「既有 terms 與 counterTerms 合併後」的結果驗證(finding #2/#5)——
+  // 只驗 counterTerms 本身會漏掉「counter 把 duration 蓋成 undefined」這種案例(spread 後
+  // merged.duration 變 undefined,但 counterTerms 單獨看可能沒有 duration 欄位、不會被擋下)。
+  if (action === 'counter') {
+    const merged = { ...terms, ...counterTerms };
+    if (validateTerms(treaty.kind, merged, true)) return err('INVALID_TERMS');
+  }
 
   if (action === 'accept') {
     const updated = withTerms(
@@ -147,6 +176,8 @@ export function breach(
   breachingId: Id,
   tick: Tick
 ): Result<{ treaties: Treaty[]; events: GameEvent[] }> {
+  if (!isValidTick(tick)) return err('INVALID_TICK');
+
   const idx = treaties.findIndex((t) => t.id === treatyId);
   if (idx === -1) return err('NOT_FOUND');
   const treaty = treaties[idx];
@@ -172,10 +203,21 @@ export function breach(
 // ---- expire ----
 
 export function expire(treaties: Treaty[], tick: Tick): Result<{ treaties: Treaty[]; events: GameEvent[] }> {
-  // 不變量:status === 'active' 的條約必有 terms.activatedAt(respond(accept) 必寫入)。
-  // 若缺失代表資料損壞,expire 整批回 Err,而非用 createdAt 猜測(那會讓條約提早/延遲到期)。
+  if (!isValidTick(tick)) return err('INVALID_TICK');
+
+  // 不變量:status === 'active' 的條約必有 terms.activatedAt(respond(accept) 必寫入),
+  // 且 activatedAt/duration 皆須是非負安全整數、兩者相加不可溢位安全整數範圍——否則到期時間
+  // 算出來會是垃圾值(finding #3)。任一被破壞,expire 整批回 Err,而非用 createdAt 猜測。
   for (const t of treaties) {
-    if (t.status === 'active' && t.terms.activatedAt === undefined) {
+    if (t.status !== 'active') continue;
+    const { activatedAt, duration } = t.terms;
+    if (
+      !Number.isSafeInteger(activatedAt) ||
+      (activatedAt as number) < 0 ||
+      !Number.isSafeInteger(duration) ||
+      duration < 0 ||
+      !Number.isSafeInteger((activatedAt as number) + duration)
+    ) {
       return err('CORRUPTED_TREATY');
     }
   }

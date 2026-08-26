@@ -18,15 +18,25 @@ function regionIndex(state: WorldState, regionId: Id): number {
   return state.regions.findIndex((r) => r.id === regionId);
 }
 
+export interface DeclareAttackResult {
+  march: March;
+  /** 呼叫端下次呼叫 declareAttack 時應存回 stateView.nextMarchSeq 的新值(finding #4/#8)。 */
+  nextMarchSeq: number;
+}
+
 export function declareAttack(
   stateView: WorldState,
   attackerId: Id,
   defenderId: Id,
   army: number,
   tick: Tick
-): Result<March> {
+): Result<DeclareAttackResult> {
   // stateView.tick 才是唯一可信的當前 tick(純函式輸入,呼叫端不可能竄改 stateView 本身而只改 tick 參數
   // 卻不同步 stateView——但仍可能誤傳不一致的 tick,故顯式校驗、不信任外部傳入值)。
+  // stateView.tick 本身也須是非負安全整數(finding #7)——corrupted tick 不該被當成合法值放行。
+  if (!Number.isSafeInteger(stateView.tick) || stateView.tick < 0) {
+    return err('INVALID_TICK');
+  }
   if (tick !== stateView.tick) {
     return err('TICK_MISMATCH');
   }
@@ -78,10 +88,17 @@ export function declareAttack(
   }
   const distance = regionDistanceByIndex(aIdx, bIdx);
   const arrivesAt = tick + marchTime(distance);
+  if (!Number.isSafeInteger(arrivesAt) || arrivesAt < 0) {
+    return err('INVALID_ARRIVAL');
+  }
 
-  // 同 attacker/defender/tick 理論上只會有一筆(受行動點與規則限制),但仍加上序號成分保底,
-  // 避免罕見的同 tick 多筆(例如未來規則放寬)撞號——同 market 的 seq 策略。
-  const seq = stateView.marches.filter((m) => m.departedAt === tick).length;
+  // march id 序號一律吃呼叫端維護的 stateView.nextMarchSeq(單調遞增),不可用
+  // marches.filter(...).length 之類「現存筆數」推算——那會在行軍抵達/撤回後被重複使用,
+  // 和歷史(已從 marches 移除但仍存在 D1/事件紀錄裡)的 March id 撞號(finding #4/#8)。
+  if (!Number.isSafeInteger(stateView.nextMarchSeq) || stateView.nextMarchSeq < 0) {
+    return err('INVALID_MARCH_SEQ');
+  }
+  const seq = stateView.nextMarchSeq;
   const march: March = {
     id: makeId('march', attackerId, defenderId, tick, seq),
     attackerId,
@@ -91,7 +108,7 @@ export function declareAttack(
     arrivesAt,
   };
 
-  return ok(march);
+  return ok({ march, nextMarchSeq: seq + 1 });
 }
 
 export function regionDistance(a: number, b: number): number {
