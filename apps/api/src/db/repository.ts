@@ -1,7 +1,7 @@
 // D1 repository 層——loadWorldState/saveWorldState(差異寫回)+ user/session CRUD。
 // 只做 prepared statement 組裝與 batch 呼叫,不含業務邏輯(業務邏輯在 packages/* 純模塊)。
 
-import type { WorldState, GameEvent, Id } from '@micronation/shared';
+import type { WorldState, GameEvent, Id, Trade, ResourceKind } from '@micronation/shared';
 import { makeId } from '@micronation/shared';
 import type { D1Database, D1PreparedStatement } from './types';
 import {
@@ -16,6 +16,7 @@ import {
   orderToRow,
   rowToOrder,
   eventToRow,
+  rowToEvent,
 } from './rows';
 
 interface SeasonRow {
@@ -100,10 +101,19 @@ export async function saveWorldState(
 ): Promise<void> {
   const stmts: D1PreparedStatement[] = [];
 
+  // events.id 用 seasons.next_event_seq 單調遞增序號組成(見 0002 migration 註解)——
+  // 同一 tick 內可能有多次 saveWorldState 呼叫(玩家操作觸發,不像 tick-cron 只跑一次),
+  // 若沿用「本次呼叫內的陣列序 i」會和先前已寫入的 event id 撞主鍵。
+  const eventSeqRow = await db
+    .prepare('SELECT next_event_seq FROM seasons WHERE id = ?')
+    .bind(next.seasonId)
+    .first<{ next_event_seq: number }>();
+  const eventSeqStart = eventSeqRow?.next_event_seq ?? 0;
+
   stmts.push(
     db
-      .prepare('UPDATE seasons SET tick = ?, next_march_seq = ? WHERE id = ?')
-      .bind(next.tick, next.nextMarchSeq, next.seasonId)
+      .prepare('UPDATE seasons SET tick = ?, next_march_seq = ?, next_event_seq = ? WHERE id = ?')
+      .bind(next.tick, next.nextMarchSeq, eventSeqStart + newEvents.length, next.seasonId)
   );
 
   diffCollection(
@@ -139,7 +149,7 @@ export async function saveWorldState(
   ).forEach((s) => stmts.push(s));
 
   newEvents.forEach((e, i) => {
-    const id = makeId('event', next.seasonId, next.tick, i);
+    const id = makeId('event', next.seasonId, eventSeqStart + i);
     const row = eventToRow(next.seasonId, id, e, eventCreatedAt);
     stmts.push(
       db
@@ -318,4 +328,161 @@ export async function findSession(db: D1Database, token: string): Promise<Sessio
 
 export async function deleteSession(db: D1Database, token: string): Promise<void> {
   await db.prepare('DELETE FROM sessions WHERE id = ?').bind(token).run();
+}
+
+// ---- seasons(M7 補充:active season 查找 + order seq) ----
+
+/** 目前唯一 active 賽季(M7 範圍:單賽季,取最早建立的 active 者)。 */
+export async function getActiveSeasonId(db: D1Database): Promise<Id | null> {
+  const row = await db
+    .prepare("SELECT id FROM seasons WHERE status = 'active' ORDER BY created_at ASC LIMIT 1")
+    .first<{ id: string }>();
+  return row?.id ?? null;
+}
+
+/**
+ * market.placeOrder 的 seq 參數來源——讀取當前值、呼叫端用完後須呼叫
+ * incrementSeasonOrderSeq 寫回遞增後的值。非 WorldState 欄位(shared 型別未收錄),
+ * 純粹是 api 層 id 產生用的內部序號。
+ * ⚠️併發限制:讀取與遞增分兩次 D1 呼叫,非原子操作;單 Worker 執行模型下多數情況已足夠
+ * 安全,但同賽季同時有多個 in-flight 請求時理論上仍可能撞號,留待 M8 視流量評估是否需要
+ * 原子 UPDATE...RETURNING 或樂觀鎖重試。
+ */
+export async function getSeasonOrderSeq(db: D1Database, seasonId: Id): Promise<number> {
+  const row = await db.prepare('SELECT next_order_seq FROM seasons WHERE id = ?').bind(seasonId).first<{
+    next_order_seq: number;
+  }>();
+  return row?.next_order_seq ?? 0;
+}
+
+export async function incrementSeasonOrderSeq(db: D1Database, seasonId: Id): Promise<void> {
+  await db
+    .prepare('UPDATE seasons SET next_order_seq = next_order_seq + 1 WHERE id = ?')
+    .bind(seasonId)
+    .run();
+}
+
+// ---- trades(市場成交紀錄,供 PriceRef 近期均價計算) ----
+
+export async function insertTrades(db: D1Database, seasonId: Id, trades: Trade[]): Promise<void> {
+  if (trades.length === 0) return;
+  const stmts = trades.map((t) =>
+    db
+      .prepare(
+        `INSERT INTO trades
+        (id, season_id, buy_order_id, sell_order_id, buyer_id, seller_id, kind, qty, price, tariff, tick)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(t.id, seasonId, t.buyOrderId, t.sellOrderId, t.buyerId, t.sellerId, t.kind, t.qty, t.price, t.tariff, t.tick)
+  );
+  await db.batch(stmts);
+}
+
+const RESOURCE_KINDS: ResourceKind[] = ['food', 'ore', 'fuel', 'money'];
+
+/** market.placeOrder 的 PriceRef.avgPrice——各資源近 N 筆成交價的平均(不足則缺值,由 market 判 unbanded)。 */
+export async function getRecentAvgPrices(
+  db: D1Database,
+  seasonId: Id,
+  lookback = 20
+): Promise<Partial<Record<ResourceKind, number>>> {
+  const avgPrice: Partial<Record<ResourceKind, number>> = {};
+  for (const kind of RESOURCE_KINDS) {
+    const row = await db
+      .prepare(
+        `SELECT AVG(price) as avg FROM (
+           SELECT price FROM trades WHERE season_id = ? AND kind = ? ORDER BY tick DESC LIMIT ?
+         )`
+      )
+      .bind(seasonId, kind, lookback)
+      .first<{ avg: number | null }>();
+    if (row?.avg !== null && row?.avg !== undefined) avgPrice[kind] = row.avg;
+  }
+  return avgPrice;
+}
+
+// ---- events(涉己事件輪詢) ----
+
+/** `/api/world?since=` 用:season 內 tick > sinceTick 且 nation_ids 涉及 nationId 的事件。 */
+export async function getEventsSince(
+  db: D1Database,
+  seasonId: Id,
+  sinceTick: number,
+  nationId: Id
+): Promise<GameEvent[]> {
+  const res = await db
+    .prepare('SELECT * FROM events WHERE season_id = ? AND tick > ? AND nation_ids LIKE ? ORDER BY tick ASC')
+    .bind(seasonId, sinceTick, `%"${nationId}"%`)
+    .all();
+  return (res.results as never[]).map((r) => rowToEvent(r as never));
+}
+
+// ---- messages(一對一站內訊息) ----
+
+export interface MessageRow {
+  id: string;
+  season_id: string;
+  from_nation_id: string;
+  to_nation_id: string;
+  body: string;
+  created_at: number;
+  read_at: number | null;
+}
+
+export async function insertMessage(db: D1Database, row: MessageRow): Promise<void> {
+  await db
+    .prepare(
+      'INSERT INTO messages (id, season_id, from_nation_id, to_nation_id, body, created_at, read_at) VALUES (?, ?, ?, ?, ?, ?, NULL)'
+    )
+    .bind(row.id, row.season_id, row.from_nation_id, row.to_nation_id, row.body, row.created_at)
+    .run();
+}
+
+export async function listMessagesForNation(
+  db: D1Database,
+  nationId: Id,
+  box: 'inbox' | 'sent'
+): Promise<MessageRow[]> {
+  const column = box === 'inbox' ? 'to_nation_id' : 'from_nation_id';
+  const res = await db
+    .prepare(`SELECT * FROM messages WHERE ${column} = ? ORDER BY created_at DESC`)
+    .bind(nationId)
+    .all<MessageRow>();
+  return res.results;
+}
+
+// ---- tasks(教學任務鏈進度) ----
+
+export interface TaskRow {
+  id: string;
+  user_id: string;
+  task_key: string;
+  completed_at: number | null;
+  created_at: number;
+}
+
+export async function getUserTaskRows(db: D1Database, userId: string): Promise<TaskRow[]> {
+  const res = await db.prepare('SELECT * FROM tasks WHERE user_id = ?').bind(userId).all<TaskRow>();
+  return res.results;
+}
+
+/** 標記任務完成——已完成則略過(冪等),對應 idx_tasks_user_key 唯一鍵。 */
+export async function completeTask(db: D1Database, userId: string, taskKey: string, now: number): Promise<void> {
+  const existing = await db
+    .prepare('SELECT completed_at FROM tasks WHERE user_id = ? AND task_key = ?')
+    .bind(userId, taskKey)
+    .first<{ completed_at: number | null }>();
+  if (existing) {
+    if (existing.completed_at === null) {
+      await db
+        .prepare('UPDATE tasks SET completed_at = ? WHERE user_id = ? AND task_key = ?')
+        .bind(now, userId, taskKey)
+        .run();
+    }
+    return;
+  }
+  await db
+    .prepare('INSERT INTO tasks (id, user_id, task_key, completed_at, created_at) VALUES (?, ?, ?, ?, ?)')
+    .bind(makeId('task', userId, taskKey), userId, taskKey, now, now)
+    .run();
 }

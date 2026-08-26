@@ -77,15 +77,11 @@ export function createTestDb(): InstanceType<typeof Database> {
   // 明確關掉 foreign_keys——比照 D1 預設行為(FK 不強制),避免測試 fixture 需要湊齊
   // 完整關聯鏈(user/region 等)才能寫入,同時貼近真正 D1 的約束強度。
   db.pragma('foreign_keys = OFF');
-  const migrationPath = path.join(
-    path.dirname(fileURLToPath(import.meta.url)),
-    '..',
-    '..',
-    'migrations',
-    '0001_init.sql'
-  );
-  const sql = readFileSync(migrationPath, 'utf-8');
-  db.exec(sql);
+  const migrationsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'migrations');
+  for (const file of ['0001_init.sql', '0002_messages.sql']) {
+    const sql = readFileSync(path.join(migrationsDir, file), 'utf-8');
+    db.exec(sql);
+  }
   return db;
 }
 
