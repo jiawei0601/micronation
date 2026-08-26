@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "proto",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8461", "--directory", "C:/CLAUDE/專案-程式/micronation/prototype"],
+      "port": 8461
+    }
+  ]
+}

@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<!-- PROTOTYPE — throwaway. 問題:微國家儀表板要走哪種視覺詮釋?
+     三變體切換:?variant=A(公文紙張擬物) / B(現代數據面板) / C(地圖主視覺)
+     選定後此檔即刪,結論寫入 docs/。 -->
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>微國家 UI 原型</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:"Noto Sans TC","Microsoft JhengHei",sans-serif; }
+  .variant { display:none; min-height:100vh; }
+  .variant.active { display:block; }
+
+  /* ───────── 切換列(非設計本體) ───────── */
+  #switcher { position:fixed; bottom:16px; left:50%; transform:translateX(-50%);
+    background:#111; color:#fff; border-radius:999px; padding:8px 14px;
+    display:flex; gap:12px; align-items:center; z-index:999;
+    box-shadow:0 4px 20px rgba(0,0,0,.4); font-size:14px; }
+  #switcher button { background:#333; color:#fff; border:0; border-radius:50%;
+    width:28px; height:28px; cursor:pointer; font-size:14px; }
+  #switcher button:hover { background:#555; }
+
+  /* ═════════ 變體 A:公文/紙張擬物風 ═════════ */
+  .vA { background:#e8e2d4; color:#2b2318; font-family:"Noto Serif TC","PMingLiU",serif; padding:24px 0 90px; }
+  .vA .sheet { max-width:880px; margin:0 auto; background:#f7f3e8; border:1px solid #c9bfa5;
+    box-shadow:0 2px 12px rgba(80,60,20,.18); padding:36px 44px; }
+  .vA .letterhead { display:flex; align-items:center; gap:18px; border-bottom:3px double #8a7a55; padding-bottom:18px; }
+  .vA .flag { width:72px; height:48px; border:1px solid #8a7a55; }
+  .vA h1 { font-size:26px; letter-spacing:6px; }
+  .vA .sub { color:#7a6c4e; font-size:13px; letter-spacing:2px; margin-top:4px; }
+  .vA .seal { margin-left:auto; width:64px; height:64px; border:3px solid #a33; border-radius:50%;
+    color:#a33; display:flex; align-items:center; justify-content:center; font-size:12px;
+    transform:rotate(-12deg); letter-spacing:1px; text-align:center; opacity:.8; }
+  .vA h2 { font-size:16px; letter-spacing:3px; border-left:5px solid #8a7a55; padding-left:10px; margin:28px 0 12px; }
+  .vA table { width:100%; border-collapse:collapse; font-size:14px; }
+  .vA th,.vA td { border:1px solid #cfc5a8; padding:7px 10px; text-align:left; }
+  .vA th { background:#eee7d3; font-weight:600; letter-spacing:1px; }
+  .vA .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .vA .pos { color:#2c6e2f; } .vA .neg { color:#a33; }
+  .vA .decree { background:#fffdf5; border:1px dashed #b5a87f; padding:10px 14px; margin-top:8px; font-size:14px; display:flex; justify-content:space-between; }
+  .vA .memo { background:#fff8ee; border-left:4px solid #c98f2d; padding:8px 12px; font-size:13px; margin-top:6px; }
+  .vA .footer-note { margin-top:30px; text-align:right; font-size:12px; color:#8a7a55; letter-spacing:2px; }
+
+  /* ═════════ 變體 B:現代數據面板風 ═════════ */
+  .vB { background:#0e1117; color:#e6e9ef; min-height:100vh; }
+  .vB.active { display:flex; }
+  .vB nav { width:200px; background:#161b24; padding:20px 0; flex-shrink:0; }
+  .vB nav .brand { display:flex; align-items:center; gap:10px; padding:0 18px 18px; border-bottom:1px solid #232a38; }
+  .vB nav .brand .flag { width:34px; height:23px; border-radius:3px; }
+  .vB nav .brand b { font-size:15px; }
+  .vB nav a { display:flex; gap:10px; padding:10px 18px; color:#9aa4b5; text-decoration:none; font-size:14px; }
+  .vB nav a.on { color:#fff; background:#1d2635; border-right:3px solid #4c8dff; }
+  .vB main { flex:1; padding:22px 26px 90px; }
+  .vB .topbar { display:flex; align-items:center; gap:14px; margin-bottom:18px; }
+  .vB .topbar h1 { font-size:19px; }
+  .vB .tick { margin-left:auto; font-size:13px; color:#9aa4b5; background:#161b24; padding:6px 12px; border-radius:8px; }
+  .vB .bell { position:relative; background:#161b24; border-radius:8px; padding:6px 10px; }
+  .vB .bell i { position:absolute; top:4px; right:5px; width:8px; height:8px; background:#e5534b; border-radius:50%; }
+  .vB .kpis { display:grid; grid-template-columns:repeat(5,1fr); gap:12px; }
+  .vB .kpi { background:#161b24; border:1px solid #232a38; border-radius:10px; padding:14px; }
+  .vB .kpi .l { font-size:12px; color:#9aa4b5; }
+  .vB .kpi .v { font-size:22px; font-weight:700; margin-top:4px; font-variant-numeric:tabular-nums; }
+  .vB .kpi .d { font-size:12px; margin-top:2px; }
+  .vB .up { color:#3fb950; } .vB .down { color:#e5534b; }
+  .vB .grid2 { display:grid; grid-template-columns:2fr 1fr; gap:12px; margin-top:12px; }
+  .vB .card { background:#161b24; border:1px solid #232a38; border-radius:10px; padding:16px; }
+  .vB .card h3 { font-size:14px; color:#c7cede; margin-bottom:10px; display:flex; justify-content:space-between; }
+  .vB .bar { height:8px; background:#232a38; border-radius:4px; overflow:hidden; margin:6px 0 10px; }
+  .vB .bar i { display:block; height:100%; background:#4c8dff; }
+  .vB .row { display:flex; justify-content:space-between; font-size:13px; padding:6px 0; border-bottom:1px solid #1d2430; }
+  .vB .tag { font-size:11px; padding:2px 8px; border-radius:999px; background:#1d2635; color:#8ab4ff; }
+  .vB .tag.war { color:#ff8f88; background:#2b1d1d; }
+  .vB .tag.ok { color:#7ee787; background:#1b2a1e; }
+
+  /* ═════════ 變體 C:地圖主視覺風 ═════════ */
+  .vC { background:#0b1d2a; color:#dce8f2; min-height:100vh; position:relative; overflow:hidden; }
+  .vC .mapwrap { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; }
+  .vC svg text { font-size:11px; fill:#9fb8cc; }
+  .vC .hud { position:absolute; backdrop-filter:blur(6px); background:rgba(13,32,46,.82);
+    border:1px solid #24455e; border-radius:12px; padding:14px 16px; font-size:13px; }
+  .vC .hud h3 { font-size:13px; color:#8fd0ff; letter-spacing:2px; margin-bottom:8px; }
+  .vC .hud .row { display:flex; justify-content:space-between; gap:18px; padding:3px 0; font-variant-numeric:tabular-nums; }
+  .vC .topband { position:absolute; top:0; left:0; right:0; display:flex; align-items:center; gap:14px;
+    padding:12px 20px; background:linear-gradient(rgba(8,20,30,.9),transparent); z-index:5; }
+  .vC .topband .flag { width:40px; height:27px; border-radius:3px; box-shadow:0 0 0 1px #24455e; }
+  .vC .topband h1 { font-size:17px; letter-spacing:2px; }
+  .vC .topband .tick { margin-left:auto; font-size:12px; color:#8fd0ff; }
+  .vC .alerts { position:absolute; top:64px; right:20px; width:270px; }
+  .vC .alert { background:rgba(13,32,46,.85); border-left:3px solid #e5534b; padding:8px 12px;
+    font-size:12px; margin-bottom:8px; border-radius:0 8px 8px 0; }
+  .vC .alert.info { border-color:#4c8dff; }
+  .vC .dock { position:absolute; bottom:70px; left:50%; transform:translateX(-50%);
+    display:flex; gap:10px; z-index:5; }
+  .vC .dock button { background:rgba(13,32,46,.9); border:1px solid #24455e; color:#dce8f2;
+    border-radius:10px; padding:10px 16px; font-size:13px; cursor:pointer; }
+  .vC .dock button:hover { border-color:#8fd0ff; }
+</style>
+</head>
+<body>
+
+<!-- ═════════ A:公文紙張 ═════════ -->
+<section class="variant vA" id="vA">
+  <div class="sheet">
+    <div class="letterhead">
+      <svg class="flag" viewBox="0 0 90 60"><rect width="90" height="60" fill="#1f4e79"/><rect width="90" height="20" y="40" fill="#c9a227"/><circle cx="24" cy="20" r="9" fill="#f2e8c9"/></svg>
+      <div>
+        <h1>晨曦共和國</h1>
+        <div class="sub">第 1 賽季 · 第 214 tick · 東方群島區 · 綜合國力第 12 名</div>
+      </div>
+      <div class="seal">國政院<br>印</div>
+    </div>
+
+    <h2>國庫歲入歲出表</h2>
+    <table>
+      <tr><th>資源</th><th class="num">存量</th><th class="num">每時辰增減</th><th>備註</th></tr>
+      <tr><td>糧食</td><td class="num">12,480</td><td class="num pos">+312</td><td>豐足</td></tr>
+      <tr><td>礦石</td><td class="num">6,102</td><td class="num pos">+188</td><td>—</td></tr>
+      <tr><td>燃料</td><td class="num">1,845</td><td class="num neg">−42</td><td>軍隊耗用中</td></tr>
+      <tr><td>金錢</td><td class="num">28,930</td><td class="num pos">+540</td><td>稅率:中</td></tr>
+      <tr><td>科技點</td><td class="num">742</td><td class="num pos">+15</td><td>大學 Lv.4</td></tr>
+    </table>
+
+    <h2>戶政與營造</h2>
+    <table>
+      <tr><td>人口 <b>45,210</b>(成長 +0.8%/時辰)</td><td>士氣 <b>良好</b></td><td>可徵兵上限 <b>4,500</b></td></tr>
+      <tr><td colspan="3">營造中:兵營 Lv.5 → Lv.6(尚餘 6 時辰)|佇列:倉庫 Lv.4</td></tr>
+    </table>
+
+    <h2>現行國策</h2>
+    <div class="decree"><span>稅率:中|經濟路線:商業立國|兵役:募兵制|開放程度:自由貿易</span><span style="color:#8a7a55">改令冷卻:無</span></div>
+
+    <h2>軍情與邦交</h2>
+    <div class="memo">⚔ 敵國「鐵砧帝國」軍隊來襲,預計 9 時辰後抵達。可備戰、撤資或求援。</div>
+    <div class="memo" style="border-color:#2c6e2f">🕊 「翡翠聯邦」提議互不侵犯條約(期 168 時辰),待批示。</div>
+    <div class="memo" style="border-color:#1f4e79">🏛 同盟「北海公約」:盟友 3 國,本國貢獻排名第 2。</div>
+
+    <div class="footer-note">國政院謹呈 · 建國之路任務 11/15 · 檢視全文另附</div>
+  </div>
+</section>
+
+<!-- ═════════ B:數據面板 ═════════ -->
+<section class="variant vB" id="vB">
+  <nav>
+    <div class="brand">
+      <svg class="flag" viewBox="0 0 90 60"><rect width="90" height="60" fill="#1f4e79"/><rect width="90" height="20" y="40" fill="#c9a227"/><circle cx="24" cy="20" r="9" fill="#f2e8c9"/></svg>
+      <b>晨曦共和國</b>
+    </div>
+    <a class="on">📊 總覽</a><a>🏗 建設</a><a>⚖ 政策</a><a>🛒 市場</a><a>⚔ 軍事</a><a>🕊 外交</a><a>🏆 排行</a><a>🌍 世界</a>
+  </nav>
+  <main>
+    <div class="topbar">
+      <h1>國家總覽</h1>
+      <span class="tag">東方群島區</span><span class="tag">S1 · 綜合第 12 名</span>
+      <div class="tick">⏱ 下次 tick:42 分鐘後(第 215 tick)</div>
+      <div class="bell">🔔<i></i></div>
+    </div>
+    <div class="kpis">
+      <div class="kpi"><div class="l">🌾 糧食</div><div class="v">12,480</div><div class="d up">+312 / tick</div></div>
+      <div class="kpi"><div class="l">⛏ 礦石</div><div class="v">6,102</div><div class="d up">+188 / tick</div></div>
+      <div class="kpi"><div class="l">🛢 燃料</div><div class="v">1,845</div><div class="d down">−42 / tick</div></div>
+      <div class="kpi"><div class="l">💰 金錢</div><div class="v">28,930</div><div class="d up">+540 / tick</div></div>
+      <div class="kpi"><div class="l">🔬 科技點</div><div class="v">742</div><div class="d up">+15 / tick</div></div>
+    </div>
+    <div class="grid2">
+      <div>
+        <div class="card">
+          <h3>人口與建設 <span class="tag ok">士氣 良好</span></h3>
+          <div class="row"><span>人口 45,210(+0.8%/tick)</span><span>徵兵上限 4,500</span></div>
+          <div style="font-size:13px;color:#9aa4b5;margin-top:10px">兵營 Lv.5 → Lv.6</div>
+          <div class="bar"><i style="width:62%"></i></div>
+          <div class="row" style="border:0"><span>佇列:倉庫 Lv.4</span><span style="color:#9aa4b5">6 tick 後完成</span></div>
+        </div>
+        <div class="card" style="margin-top:12px">
+          <h3>現行政策 <span style="color:#9aa4b5;font-weight:400">改動冷卻:無</span></h3>
+          <div class="row"><span>稅率</span><span class="tag">中</span></div>
+          <div class="row"><span>經濟路線</span><span class="tag">商業立國</span></div>
+          <div class="row"><span>兵役制度</span><span class="tag">募兵制</span></div>
+          <div class="row" style="border:0"><span>開放程度</span><span class="tag">自由貿易</span></div>
+        </div>
+      </div>
+      <div>
+        <div class="card">
+          <h3>事件 <span class="tag war">1 則警報</span></h3>
+          <div class="row"><span>⚔ 鐵砧帝國來襲</span><span class="tag war">9 tick</span></div>
+          <div class="row"><span>🕊 翡翠聯邦提議 NAP</span><span class="tag">待回覆</span></div>
+          <div class="row" style="border:0"><span>🏛 北海公約貢獻</span><span class="tag ok">第 2 名</span></div>
+        </div>
+        <div class="card" style="margin-top:12px">
+          <h3>建國之路</h3>
+          <div class="bar"><i style="width:73%;background:#3fb950"></i></div>
+          <div class="row" style="border:0"><span>任務 11/15</span><span style="color:#9aa4b5">下一步:簽署首個貿易協定</span></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</section>
+
+<!-- ═════════ C:地圖主視覺 ═════════ -->
+<section class="variant vC" id="vC">
+  <div class="mapwrap">
+    <svg viewBox="0 0 900 520" width="92%" style="max-width:1100px">
+      <defs><filter id="gl"><feDropShadow dx="0" dy="0" stdDeviation="6" flood-color="#8fd0ff" flood-opacity=".5"/></filter></defs>
+      <path d="M80,120 L230,80 L310,150 L260,240 L120,230 Z" fill="#16394f" stroke="#24455e"/>
+      <path d="M330,60 L520,40 L590,130 L500,210 L360,180 Z" fill="#16394f" stroke="#24455e"/>
+      <path d="M620,90 L800,70 L850,180 L740,260 L640,200 Z" fill="#1d5673" stroke="#8fd0ff" filter="url(#gl)"/>
+      <path d="M100,300 L280,280 L330,390 L220,460 L110,420 Z" fill="#16394f" stroke="#24455e"/>
+      <path d="M370,260 L540,250 L600,360 L480,440 L380,400 Z" fill="#16394f" stroke="#24455e"/>
+      <path d="M640,320 L810,300 L860,410 L730,480 L650,430 Z" fill="#16394f" stroke="#24455e"/>
+      <text x="140" y="170">北境高地</text><text x="420" y="120">中原平野</text>
+      <text x="700" y="160" fill="#cfe9ff" font-weight="bold">東方群島 ★</text>
+      <text x="180" y="380">西漠礦區</text><text x="450" y="350">南方沃土</text><text x="710" y="400">遠洋列嶼</text>
+      <circle cx="720" cy="160" r="5" fill="#ffd166"/>
+      <line x1="430" y1="115" x2="712" y2="156" stroke="#e5534b" stroke-dasharray="6 4"/>
+      <text x="540" y="122" fill="#ff8f88">⚔ 敵軍行軍中 · 9 tick</text>
+    </svg>
+  </div>
+  <div class="topband">
+    <svg class="flag" viewBox="0 0 90 60"><rect width="90" height="60" fill="#1f4e79"/><rect width="90" height="20" y="40" fill="#c9a227"/><circle cx="24" cy="20" r="9" fill="#f2e8c9"/></svg>
+    <h1>晨曦共和國</h1><span style="font-size:12px;color:#7fa3bd">東方群島 · S1 綜合第 12 名</span>
+    <div class="tick">⏱ 第 214 tick · 下次 42 分後</div>
+  </div>
+  <div class="hud" style="left:20px; top:64px">
+    <h3>國庫</h3>
+    <div class="row"><span>🌾 糧食</span><b>12,480 <span style="color:#3fb950">+312</span></b></div>
+    <div class="row"><span>⛏ 礦石</span><b>6,102 <span style="color:#3fb950">+188</span></b></div>
+    <div class="row"><span>🛢 燃料</span><b>1,845 <span style="color:#e5534b">−42</span></b></div>
+    <div class="row"><span>💰 金錢</span><b>28,930 <span style="color:#3fb950">+540</span></b></div>
+    <div class="row"><span>🔬 科技</span><b>742 <span style="color:#3fb950">+15</span></b></div>
+  </div>
+  <div class="hud" style="left:20px; bottom:70px">
+    <h3>內政</h3>
+    <div class="row"><span>人口</span><b>45,210(+0.8%)</b></div>
+    <div class="row"><span>士氣</span><b style="color:#3fb950">良好</b></div>
+    <div class="row"><span>建設</span><b>兵營 Lv.6 · 62%</b></div>
+    <div class="row"><span>政策</span><b>商業立國 · 募兵</b></div>
+  </div>
+  <div class="alerts">
+    <div class="alert">⚔ 鐵砧帝國軍隊來襲,9 tick 後抵達</div>
+    <div class="alert info">🕊 翡翠聯邦提議互不侵犯條約</div>
+    <div class="alert info" style="border-color:#3fb950">📜 建國之路 11/15:簽署首個貿易協定</div>
+  </div>
+  <div class="dock">
+    <button>🏗 建設</button><button>⚖ 政策</button><button>🛒 市場</button><button>⚔ 軍事</button><button>🕊 外交</button><button>🏆 排行</button>
+  </div>
+</section>
+
+<div id="switcher">
+  <button id="prev">←</button>
+  <span id="label"></span>
+  <button id="next">→</button>
+</div>
+
+<script>
+const variants = [
+  ['A','公文紙張擬物風'],
+  ['B','現代數據面板風'],
+  ['C','地圖主視覺風'],
+];
+function cur(){ return new URLSearchParams(location.search).get('variant') || 'A'; }
+function show(k){
+  document.querySelectorAll('.variant').forEach(s=>s.classList.remove('active'));
+  document.getElementById('v'+k).classList.add('active');
+  const v = variants.find(x=>x[0]===k) || variants[0];
+  document.getElementById('label').textContent = v[0]+' — '+v[1];
+  history.replaceState(null,'','?variant='+k);
+}
+function step(d){
+  const i = variants.findIndex(x=>x[0]===cur());
+  show(variants[(i+d+variants.length)%variants.length][0]);
+}
+document.getElementById('prev').onclick = ()=>step(-1);
+document.getElementById('next').onclick = ()=>step(1);
+document.addEventListener('keydown',e=>{
+  if(/INPUT|TEXTAREA/.test(document.activeElement.tagName)) return;
+  if(e.key==='ArrowLeft') step(-1); if(e.key==='ArrowRight') step(1);
+});
+show(cur());
+</script>
+</body>
+</html>
