@@ -56,12 +56,14 @@ resolveTick(state: WorldState, seed: string): { state: WorldState; events: GameE
 ## market(packages/market)
 
 ```ts
-placeOrder(book: MarketOrder[], o: NewOrder, ref: PriceRef, ctx: NationCtx): Result<{book, trades}>
+placeOrder(book: MarketOrder[], o: NewOrder, ref: PriceRef, ctx: NationCtx, tariffRate: number): Result<{book, trades}>
 cancelOrder(book, orderId, nationId): Result<{book}>
 // MarketOrder: { id, nationId, kind: ResourceKind, side: 'buy'|'sell', qty, price, createdAt }
 // PriceRef: 近期成交均價表;偏離 ±30% → Err('PRICE_BAND')
 // NationCtx: { verified: boolean; protectedUntil; tick } — 未驗證/保護期大額 → Err
-// 撮合:價格優先→時間優先;部分成交允許;Trade 記錄雙方與跨區關稅欄位(稅率由呼叫端算好傳入)
+// tariffRate: 跨區關稅率(呼叫端算好傳入,同區/免稅傳 0);Trade.tariff = round(成交量 × 成交價 × tariffRate)
+// 撮合:價格優先→時間優先;部分成交允許
+// id 一律走 shared.makeId(prefix, ...parts) 純字串組合,不可用 Date.now/crypto
 ```
 `Result<T> = { ok: true; value: T } | { ok: false; error: string }`(shared 定義,全模塊共用,不丟例外)。
 
@@ -69,7 +71,10 @@ cancelOrder(book, orderId, nationId): Result<{book}>
 
 ```ts
 propose/respond/breach/expire → 純狀態轉移函式,輸入 Treaty[]+動作,輸出 Result<{treaties, events}>
-// Treaty: { id, kind: 'nap'|'alliance'|'trade', aId, bId, status: 'proposed'|'countered'|'active'|'expired'|'breached'|'rejected', terms: {duration, compensation?}, createdAt }
+// Treaty: { id, kind: 'nap'|'alliance'|'trade', aId, bId, status: 'proposed'|'countered'|'active'|'expired'|'breached'|'rejected', terms: TreatyTerms, createdAt }
+// TreatyTerms(shared/types.ts 正本): { duration, compensation?; allianceDefense?(kind==='alliance' 協防旗標);
+//   tariffDiscount?(kind==='trade' 關稅減免率 0~1); pendingResponderId?(propose/counter 後下一次 respond 應由誰發起);
+//   activatedAt?(進入 active 的 tick,expire 以此+duration 判定到期) }
 canAttack(treaties, attackerId, defenderId): { allowed: boolean; reason?: 'NAP'|'ALLIANCE' }
 breachPenalty(treaty): { compensation: number; reputationDelta: number }
 ```
@@ -78,7 +83,7 @@ breachPenalty(treaty): { compensation: number; reputationDelta: number }
 
 ```ts
 declareAttack(state-view, attackerId, defenderId, army, tick): Result<March>
-// 檢查:保護期、打農(國力比 < FARM_RATIO 無收益→Err 'FARMING')、NAP(呼叫 diplomacy.canAttack)、行動點
+// 檢查:保護期、打農(國力比 < FARM_RATIO 無收益→Err 'FARMING')、NAP(呼叫 diplomacy.canAttack)、行動點(ATTACK_ACTION_POINT_COST,shared/constants)
 // March: { id, attackerId, defenderId, size, departedAt, arrivesAt } — arrivesAt = tick + marchTime(regionDistance)
 regionDistance(a: Region 索引, b): number   // 距離表在 shared/constants
 ```
@@ -90,6 +95,8 @@ regionDistance(a: Region 索引, b): number   // 距離表在 shared/constants
 decideActions(nation: Nation, view: PublicWorldView, seed: string): NpcAction[]
 // NpcAction 是與玩家 API 同語意的指令聯集:{type:'build'|'placeOrder'|'train'|...}
 // 規則狀態機:糧食缺→買/蓋農場;盈餘→掛賣單;被打過→練兵;不主動攻擊玩家。
+// 倉容公式 warehouseCapacity(level)、練兵成本 TRAIN_COST_PER_UNIT、佇列容量 BUILD_QUEUE_CAPACITY、
+// NPC 初始值 NPC_INITIAL_*——皆定義於 shared/constants.ts,npc 讀取同一份,不得自建假設值。
 ```
 
 ## db / auth / api / tick-cron(apps/api)

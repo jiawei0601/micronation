@@ -83,13 +83,26 @@ export type TreatyStatus =
   | 'breached'
   | 'rejected';
 
+export interface TreatyTerms {
+  duration: Tick;
+  compensation?: number;
+  /** kind==='alliance' 專屬:協防旗標 */
+  allianceDefense?: boolean;
+  /** kind==='trade' 專屬:關稅減免率,0~1 */
+  tariffDiscount?: number;
+  /** propose/counter 後,下一次 respond 應由誰發起 */
+  pendingResponderId?: Id;
+  /** 進入 active 的 tick,expire 以此 + duration 判定到期(createdAt 是提案時間,非生效時間) */
+  activatedAt?: Tick;
+}
+
 export interface Treaty {
   id: Id;
   kind: TreatyKind;
   aId: Id;
   bId: Id;
   status: TreatyStatus;
-  terms: { duration: number; compensation?: number };
+  terms: TreatyTerms;
   createdAt: Tick;
 }
 

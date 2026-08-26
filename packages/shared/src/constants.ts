@@ -1,6 +1,6 @@
 // 平衡常數——集中單檔,不得散落到各模塊。數值為 M0 拍板初值,後續依測試調整。
 
-import type { BuildingKind, ResourceKind, TaxTier, EconomyTier, ConscriptionTier, OpennessTier, Tick } from './types';
+import type { BuildingKind, ResourceKind, TaxTier, EconomyTier, ConscriptionTier, OpennessTier, Tick, Resources, PolicyAxis } from './types';
 
 // ---- 建築:各級產出/成本/升級時間 ----
 // cost 為升到「下一級」所需資源;time 為該次升級耗費 tick 數。index 0 = 從 0→1 級。
@@ -100,3 +100,73 @@ export const PROTECTED_ORDER_QTY_CAP = 50; // 保護期內大額掛單上限
 export const PROTECTION_TICKS = 168; // 新手保護期(tick),對應 168 小時(一週,每小時一 tick)
 export const ACTION_POINTS_PER_TICK = 1;
 export const ACTION_POINTS_MAX = 24;
+
+// ---- 糧食與人口(原 engine 本地,已收攏) ----
+export const FOOD_PER_POP = 0.1; // 每人口每 tick 消耗糧食
+export const POP_GROWTH_RATE = 0.02; // 糧食有盈餘時,人口成長率(受士氣調整)
+export const POP_DECLINE_RATE = 0.03; // 糧食短缺時,人口衰退率
+export const MIN_POPULATION = 10; // 人口下限(不可滅國)
+
+export const MORALE_SURPLUS_DELTA = 1; // 糧食盈餘 → 士氣 +
+export const MORALE_DEFICIT_DELTA = -3; // 糧食短缺 → 士氣 -
+
+// ---- 戰鬥修正係數(原 engine 本地,已收攏) ----
+export const TECH_MOD_PER_LEVEL = 0.05; // techMod = 1 + tech * this
+export const MORALE_MOD_BASE = 0.5; // moraleMod = base + morale/100 * scale → [0.5, 1.0]
+export const MORALE_MOD_SCALE = 0.5;
+
+export const WAREHOUSE_PROTECTION_PER_LEVEL = 200; // 每倉庫等級,每種資源受保護額度
+export const FUEL_COST_PER_ARMY = 0.5; // 攻方每兵力燃料成本
+export const ATTACKER_LOSS_RATE_WIN = 0.05; // 攻方獲勝時的兵力損失率
+export const ATTACKER_LOSS_RATE_LOSE = 0.15; // 攻方落敗時的兵力損失率
+export const MIN_ARMY_AFTER_BATTLE = 0; // 兵力可歸零(不同於人口不可歸零)
+
+// ---- 計分權重(原 engine 本地,已收攏) ----
+export const ECONOMY_SCORE_WEIGHT: Record<ResourceKind, number> = {
+  food: 0.1,
+  ore: 0.1,
+  fuel: 0.15,
+  money: 0.05,
+};
+export const ECONOMY_SCORE_PER_BUILDING_LEVEL = 5;
+export const TECH_SCORE_PER_LEVEL = 10;
+export const DIPLOMACY_SCORE_PER_ACTIVE_TREATY = 5;
+
+export const WARFARE_WIN_BASE = 10; // 每場勝仗基礎戰功
+export const WARFARE_NPC_MULT = 0.5; // 對手為 NPC → 戰功 5 折
+
+// ---- 出征行動點成本(原 military 本地,已收攏) ----
+export const ATTACK_ACTION_POINT_COST = 1;
+
+// ---- 倉庫容量公式 / 練兵成本 / 佇列容量 / NPC 初始值(原 npc 本地假設,已收攏) ----
+export const WAREHOUSE_BASE_CAPACITY = 200; // warehouse 0 級時的基礎倉容(每資源)
+export const WAREHOUSE_LEVEL_STEP = 150; // 每級倉庫額外增加的容量
+
+export function warehouseCapacity(level: number): number {
+  return WAREHOUSE_BASE_CAPACITY + level * WAREHOUSE_LEVEL_STEP;
+}
+
+export const TRAIN_COST_PER_UNIT: Partial<Record<ResourceKind, number>> = { money: 5 };
+export const BUILD_QUEUE_CAPACITY = 1; // 單一建造佇列同時可排入數量
+
+export const NPC_INITIAL_RESOURCES: Resources = { food: 300, ore: 200, fuel: 100, money: 500 };
+export const NPC_INITIAL_BUILDINGS: Record<BuildingKind, number> = {
+  farm: 1,
+  mine: 1,
+  refinery: 0,
+  market: 0,
+  barracks: 0,
+  warehouse: 0,
+  university: 0,
+  wall: 0,
+};
+export const NPC_INITIAL_ACTION_POINTS = 5;
+export const NPC_INITIAL_POPULATION = 100;
+export const NPC_INITIAL_MORALE = 60;
+export const NPC_INITIAL_ARMY_SIZE = 10;
+export const NPC_INITIAL_POLICIES: Record<PolicyAxis, string> = {
+  tax: 'mid',
+  economy: 'agri',
+  conscription: 'volunteer',
+  openness: 'neutral',
+};

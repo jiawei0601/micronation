@@ -1,0 +1,225 @@
+import { describe, it, expect } from 'vitest';
+import type { Nation, Region, WorldState } from '@micronation/shared';
+import { marchTime, regionDistanceByIndex } from '@micronation/shared';
+import { declareAttack, regionDistance, recallMarch } from '../src/index';
+
+function makeNation(overrides: Partial<Nation> = {}): Nation {
+  return {
+    id: 'n1',
+    ownerId: 'u1',
+    name: '測試國',
+    flag: { layout: 'stripes', colors: ['#fff'], emblem: 'star' },
+    regionId: 'r0',
+    resources: { food: 100, ore: 100, fuel: 100, money: 100 },
+    tech: 1,
+    actionPoints: 10,
+    population: 100,
+    morale: 50,
+    buildings: {
+      farm: 0,
+      mine: 0,
+      refinery: 0,
+      market: 0,
+      barracks: 0,
+      warehouse: 0,
+      university: 0,
+      wall: 0,
+    },
+    buildQueue: [],
+    army: { size: 100 },
+    policies: { tax: 'mid', economy: 'agri', conscription: 'volunteer', openness: 'neutral' },
+    policyChangedAt: {},
+    reputation: { breaches: 0 },
+    protectedUntil: 0,
+    score: { economy: 50, warfare: 50, tech: 50, diplomacy: 50, total: 200 },
+    createdAt: 0,
+    ...overrides,
+  };
+}
+
+function makeRegion(id: string): Region {
+  return { id, name: id, bonuses: {} };
+}
+
+function makeState(nations: Nation[], overrides: Partial<WorldState> = {}): WorldState {
+  return {
+    seasonId: 's1',
+    tick: 0,
+    regions: [makeRegion('r0'), makeRegion('r1'), makeRegion('r2')],
+    nations,
+    marches: [],
+    treaties: [],
+    orders: [],
+    ...overrides,
+  };
+}
+
+describe('declareAttack', () => {
+  it('rejects attacking oneself', () => {
+    const attacker = makeNation({ id: 'a' });
+    const state = makeState([attacker]);
+    const result = declareAttack(state, 'a', 'a', 10, 0);
+    expect(result).toEqual({ ok: false, error: 'SELF_ATTACK' });
+  });
+
+  it('rejects when attacker not found', () => {
+    const defender = makeNation({ id: 'b' });
+    const state = makeState([defender]);
+    const result = declareAttack(state, 'ghost', 'b', 10, 0);
+    expect(result).toEqual({ ok: false, error: 'ATTACKER_NOT_FOUND' });
+  });
+
+  it('rejects when defender not found', () => {
+    const attacker = makeNation({ id: 'a' });
+    const state = makeState([attacker]);
+    const result = declareAttack(state, 'a', 'ghost', 10, 0);
+    expect(result).toEqual({ ok: false, error: 'DEFENDER_NOT_FOUND' });
+  });
+
+  it('rejects when defender still in protection period', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'r0' });
+    const defender = makeNation({ id: 'b', regionId: 'r1', protectedUntil: 50 });
+    const state = makeState([attacker, defender]);
+    const result = declareAttack(state, 'a', 'b', 10, 10);
+    expect(result).toEqual({ ok: false, error: 'PROTECTED' });
+  });
+
+  it('rejects zero army size', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'r0', army: { size: 100 } });
+    const defender = makeNation({ id: 'b', regionId: 'r1' });
+    const state = makeState([attacker, defender]);
+    const result = declareAttack(state, 'a', 'b', 0, 0);
+    expect(result).toEqual({ ok: false, error: 'INSUFFICIENT_ARMY' });
+  });
+
+  it('rejects army size larger than attacker has', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'r0', army: { size: 50 } });
+    const defender = makeNation({ id: 'b', regionId: 'r1' });
+    const state = makeState([attacker, defender]);
+    const result = declareAttack(state, 'a', 'b', 51, 0);
+    expect(result).toEqual({ ok: false, error: 'INSUFFICIENT_ARMY' });
+  });
+
+  it('rejects farming a much weaker nation', () => {
+    const attacker = makeNation({
+      id: 'a',
+      regionId: 'r0',
+      score: { economy: 100, warfare: 100, tech: 100, diplomacy: 100, total: 1000 },
+    });
+    const defender = makeNation({
+      id: 'b',
+      regionId: 'r1',
+      score: { economy: 10, warfare: 10, tech: 10, diplomacy: 10, total: 100 },
+    });
+    const state = makeState([attacker, defender]);
+    // ratio = 100/1000 = 0.1 < FARM_RATIO(0.5)
+    const result = declareAttack(state, 'a', 'b', 10, 0);
+    expect(result).toEqual({ ok: false, error: 'FARMING' });
+  });
+
+  it('allows attacking a comparable nation (ratio above FARM_RATIO)', () => {
+    const attacker = makeNation({
+      id: 'a',
+      regionId: 'r0',
+      score: { economy: 100, warfare: 100, tech: 100, diplomacy: 100, total: 200 },
+    });
+    const defender = makeNation({
+      id: 'b',
+      regionId: 'r1',
+      score: { economy: 100, warfare: 100, tech: 100, diplomacy: 100, total: 200 },
+    });
+    const state = makeState([attacker, defender]);
+    const result = declareAttack(state, 'a', 'b', 10, 0);
+    expect(result.ok).toBe(true);
+  });
+
+  it('rejects when a NAP treaty blocks the attack (via diplomacy.canAttack)', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'r0' });
+    const defender = makeNation({ id: 'b', regionId: 'r1' });
+    const state = makeState([attacker, defender], {
+      treaties: [
+        {
+          id: 't1',
+          kind: 'nap',
+          aId: 'a',
+          bId: 'b',
+          status: 'active',
+          terms: { duration: 100 },
+          createdAt: 0,
+        },
+      ],
+    });
+    const result = declareAttack(state, 'a', 'b', 10, 0);
+    expect(result).toEqual({ ok: false, error: 'NAP' });
+  });
+
+  it('rejects when attacker lacks action points', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'r0', actionPoints: 0 });
+    const defender = makeNation({ id: 'b', regionId: 'r1' });
+    const state = makeState([attacker, defender]);
+    const result = declareAttack(state, 'a', 'b', 10, 0);
+    expect(result).toEqual({ ok: false, error: 'INSUFFICIENT_ACTION_POINTS' });
+  });
+
+  it('computes arrivesAt using marchTime(regionDistance) on success', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'r0' });
+    const defender = makeNation({ id: 'b', regionId: 'r2' });
+    const state = makeState([attacker, defender]);
+    const tick = 5;
+    const result = declareAttack(state, 'a', 'b', 10, tick);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const distance = regionDistanceByIndex(0, 2);
+      expect(result.value.arrivesAt).toBe(tick + marchTime(distance));
+      expect(result.value.departedAt).toBe(tick);
+      expect(result.value.size).toBe(10);
+    }
+  });
+});
+
+describe('marchTime / regionDistance', () => {
+  it('regionDistance matches shared regionDistanceByIndex', () => {
+    expect(regionDistance(0, 3)).toBe(regionDistanceByIndex(0, 3));
+    expect(regionDistance(2, 2)).toBe(0);
+  });
+
+  it('marchTime grows with distance', () => {
+    expect(marchTime(0)).toBeLessThan(marchTime(5));
+  });
+});
+
+describe('recallMarch', () => {
+  const march = {
+    id: 'm1',
+    attackerId: 'a',
+    defenderId: 'b',
+    size: 10,
+    departedAt: 0,
+    arrivesAt: 10,
+  };
+
+  it('allows recall before arrival', () => {
+    const result = recallMarch([march], 'm1', 'a', 5);
+    expect(result).toEqual({ ok: true, value: { marches: [] } });
+  });
+
+  it('rejects recall exactly at arrival tick (boundary)', () => {
+    const result = recallMarch([march], 'm1', 'a', 10);
+    expect(result).toEqual({ ok: false, error: 'ALREADY_ARRIVED' });
+  });
+
+  it('rejects recall after arrival', () => {
+    const result = recallMarch([march], 'm1', 'a', 11);
+    expect(result).toEqual({ ok: false, error: 'ALREADY_ARRIVED' });
+  });
+
+  it('rejects recall by a non-owner nation', () => {
+    const result = recallMarch([march], 'm1', 'c', 5);
+    expect(result).toEqual({ ok: false, error: 'NOT_FOUND' });
+  });
+
+  it('rejects recall of unknown march id', () => {
+    const result = recallMarch([march], 'nope', 'a', 5);
+    expect(result).toEqual({ ok: false, error: 'NOT_FOUND' });
+  });
+});
