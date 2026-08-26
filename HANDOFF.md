@@ -8,6 +8,7 @@
 - M0 monorepo scaffold(npm workspaces、shared 型別/常數/RNG/Result、vitest+tsc 綠)。
 - M1-M5(engine/market/diplomacy/military/npc)五模塊平行實作+收攏(統一常數/型別)。
 - Codex 審查四輪收斂:41+16+6 findings 全修,四審 approve(2026-08-26,session 01a03cb9)。M0-M5 可交付。
+- M6 db+auth(D1 12表+repository 差異寫回+PBKDF2/session,14 tests)+M9 前端 MVP(全路由+旗幟產生器+mock 世界+輪詢,29 tests)。239 tests 綠。dev:`npm run dev -w @micronation/web`(mock 模式預設開)。已知小瑕疵:地圖殼士氣顯示原文 medium、事件流顯示原始 event type 未走 i18n——UI Polish 階段處理。
   (本次,2026-08-26)。第二輪重點:engine 戰功計分移除 `|| 1` fallback、diplomacy 統一
   `validateTerms`(kind 相容性+tick 驗證)、market 撮合前 notional/tariff safe-integer 檢查、
   military march id 改用 `WorldState.nextMarchSeq` 單調計數器(取代原本 finding #21 的
@@ -17,7 +18,7 @@
   詳細條款見 docs/CONTRACT.md(標「第二輪 finding #N」的段落)。
 
 ## 下一步
-1. M6(db+auth)→M7(api)→M8(tick-cron)依序(共享 apps/api,不平行)。M9(web)可與 M6-M8 平行。
+1. ✅M6+M9 完成(2026-08-26,commit abe153f)。剩 M7(api 路由接線)→M8(tick-cron)依序。
    **注意**:api 層要接上 military.declareAttack 時,務必把 WorldState.nextMarchSeq 存回 D1
    並在每次呼叫後更新(declareAttack 回傳 `{march, nextMarchSeq}`,不再只回 March)。
 2. 完成後照 R6:新功能強制 Codex 審(MCP review_code)。
