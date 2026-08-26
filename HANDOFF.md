@@ -8,21 +8,19 @@
 - M0 monorepo scaffold(npm workspaces、shared 型別/常數/RNG/Result、vitest+tsc 綠)。
 - M1-M5(engine/market/diplomacy/military/npc)五模塊平行實作+收攏(統一常數/型別)。
 - Codex 審查四輪收斂:41+16+6 findings 全修,四審 approve(2026-08-26,session 01a03cb9)。M0-M5 可交付。
+- M6-M9 全部完成並過審:M7 api 全路由+教學任務、M8 tick-cron+賽季管理+admin 開季、玩家練兵路由。
+  Codex 七輪審查收斂(一審 72→二審 50→三審 21→四審 13→五審 4→六審 1→七審 approve),
+  共 161 條 findings 全修,484 tests 綠。重大修復:市場 escrow 結算、session/verify token 雜湊化、
+  tick lease+時槽冪等、events.seq AUTOINCREMENT、樂觀鎖 version、前端跨帳號重置、logout 失敗處理。
 - M6 db+auth(D1 12表+repository 差異寫回+PBKDF2/session,14 tests)+M9 前端 MVP(全路由+旗幟產生器+mock 世界+輪詢,29 tests)。239 tests 綠。dev:`npm run dev -w @micronation/web`(mock 模式預設開)。已知小瑕疵:地圖殼士氣顯示原文 medium、事件流顯示原始 event type 未走 i18n——UI Polish 階段處理。
-  (本次,2026-08-26)。第二輪重點:engine 戰功計分移除 `|| 1` fallback、diplomacy 統一
-  `validateTerms`(kind 相容性+tick 驗證)、market 撮合前 notional/tariff safe-integer 檢查、
-  military march id 改用 `WorldState.nextMarchSeq` 單調計數器(取代原本 finding #21 的
-  「同 tick 現存筆數」算法,已知不耐撤軍重宣戰)、npc 規則④改嚴格互斥(actions.length===0)+
-  wasAttacked 拒絕未來時間戳、shared/view.ts 全面深拷貝+新增 PublicMarch(viewer 為當事方才見
-  精確 size,否則 sizeTier)+armySizeTier 拒絕非法輸入。192 tests 綠、tsc -b 綠。
-  詳細條款見 docs/CONTRACT.md(標「第二輪 finding #N」的段落)。
 
 ## 下一步
-1. ✅M6+M9 完成(2026-08-26,commit abe153f)。剩 M7(api 路由接線)→M8(tick-cron)依序。
-   **注意**:api 層要接上 military.declareAttack 時,務必把 WorldState.nextMarchSeq 存回 D1
-   並在每次呼叫後更新(declareAttack 回傳 `{march, nextMarchSeq}`,不再只回 March)。
-2. 完成後照 R6:新功能強制 Codex 審(MCP review_code)。
-3. Cloudflare 部署(wrangler,帳號待使用者提供/授權)。
+1. ✅M0-M9 全部完成且 Codex approve(2026-08-26)。
+2. **Cloudflare 部署**(下一步,需使用者在場):註冊/登入 CF→`wrangler login`→建 D1(micronation-db,
+   替換 wrangler.toml placeholder id)→跑 migration→`wrangler secret put ADMIN_TOKEN`(+正式寄信需
+   RESEND_API_KEY,無則 ENVIRONMENT 必須非 production 語意——mail fail-closed 見 index.ts)→部署
+   Workers+Pages→admin 開 S1(POST /api/admin/season)→煙霧測試(註冊/開國/tick)。
+3. 部署後:UI Polish(HANDOFF 舊註記的 i18n 小瑕疵)+/security-review+對外發佈。
 
 ## 決策+原因(摘要,全文見 docs/)
 賽季 8 週/每小時 tick/抽象區域/4 資源+特化逼貿易/掠奪有上限不可滅國/系統強制條約+信譽/4 軸政策/一國一城/市場掛單無定向轉帳(反小號)/NPC 冷啟動/戰功計分非囤兵/組合式旗幟(零審核)/CF Workers+D1+Pages $0(使用者明確不用自有 Hetzner)。
@@ -37,4 +35,4 @@
 `npm install && npm test`(全 workspace vitest);型別 `npx tsc -b`。
 
 ## 最後 commit
-修 Codex 二輪審查 16 findings(shared/engine/market/diplomacy/military/npc)。實作=Claude Code(單一 writer,未再轉派),審查待 Codex(照 AGENTS.md R1-R6)。
+七審 minor cap cleanup 收尾。實作=Claude Code(sonnet subagents,主對話收攏),審查=Codex 七輪 approve(session 01a03cb9)。
