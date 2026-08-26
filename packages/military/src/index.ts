@@ -2,6 +2,7 @@ import type { March, Id, WorldState, Tick } from '@micronation/shared';
 import {
   ok,
   err,
+  makeId,
   FARM_RATIO,
   marchTime,
   regionDistanceByIndex,
@@ -24,6 +25,12 @@ export function declareAttack(
   army: number,
   tick: Tick
 ): Result<March> {
+  // stateView.tick 才是唯一可信的當前 tick(純函式輸入,呼叫端不可能竄改 stateView 本身而只改 tick 參數
+  // 卻不同步 stateView——但仍可能誤傳不一致的 tick,故顯式校驗、不信任外部傳入值)。
+  if (tick !== stateView.tick) {
+    return err('TICK_MISMATCH');
+  }
+
   if (attackerId === defenderId) {
     return err('SELF_ATTACK');
   }
@@ -37,7 +44,13 @@ export function declareAttack(
     return err('PROTECTED');
   }
 
-  if (army <= 0 || army > attacker.army.size) {
+  // 在途行軍(尚未抵達)占用的兵力不可再次出征;army 必為正的安全整數(拒絕 NaN/小數/Infinity)。
+  const inFlight = stateView.marches
+    .filter((m) => m.attackerId === attackerId && m.arrivesAt > tick)
+    .reduce((sum, m) => sum + m.size, 0);
+  const availableArmy = attacker.army.size - inFlight;
+
+  if (!Number.isSafeInteger(army) || army <= 0 || army > availableArmy) {
     return err('INSUFFICIENT_ARMY');
   }
 
@@ -60,11 +73,17 @@ export function declareAttack(
 
   const aIdx = regionIndex(stateView, attacker.regionId);
   const bIdx = regionIndex(stateView, defender.regionId);
+  if (aIdx === -1 || bIdx === -1) {
+    return err('REGION_NOT_FOUND');
+  }
   const distance = regionDistanceByIndex(aIdx, bIdx);
   const arrivesAt = tick + marchTime(distance);
 
+  // 同 attacker/defender/tick 理論上只會有一筆(受行動點與規則限制),但仍加上序號成分保底,
+  // 避免罕見的同 tick 多筆(例如未來規則放寬)撞號——同 market 的 seq 策略。
+  const seq = stateView.marches.filter((m) => m.departedAt === tick).length;
   const march: March = {
-    id: `${attackerId}-${defenderId}-${tick}-march`,
+    id: makeId('march', attackerId, defenderId, tick, seq),
     attackerId,
     defenderId,
     size: army,

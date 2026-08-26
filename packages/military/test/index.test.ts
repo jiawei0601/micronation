@@ -79,7 +79,7 @@ describe('declareAttack', () => {
   it('rejects when defender still in protection period', () => {
     const attacker = makeNation({ id: 'a', regionId: 'r0' });
     const defender = makeNation({ id: 'b', regionId: 'r1', protectedUntil: 50 });
-    const state = makeState([attacker, defender]);
+    const state = makeState([attacker, defender], { tick: 10 });
     const result = declareAttack(state, 'a', 'b', 10, 10);
     expect(result).toEqual({ ok: false, error: 'PROTECTED' });
   });
@@ -164,8 +164,8 @@ describe('declareAttack', () => {
   it('computes arrivesAt using marchTime(regionDistance) on success', () => {
     const attacker = makeNation({ id: 'a', regionId: 'r0' });
     const defender = makeNation({ id: 'b', regionId: 'r2' });
-    const state = makeState([attacker, defender]);
     const tick = 5;
+    const state = makeState([attacker, defender], { tick });
     const result = declareAttack(state, 'a', 'b', 10, tick);
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -174,6 +174,76 @@ describe('declareAttack', () => {
       expect(result.value.departedAt).toBe(tick);
       expect(result.value.size).toBe(10);
     }
+  });
+
+  it('rejects when the passed tick does not match stateView.tick', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'r0' });
+    const defender = makeNation({ id: 'b', regionId: 'r1' });
+    const state = makeState([attacker, defender], { tick: 3 });
+    const result = declareAttack(state, 'a', 'b', 10, 4);
+    expect(result).toEqual({ ok: false, error: 'TICK_MISMATCH' });
+  });
+
+  it('rejects when attacker regionId is not found in stateView.regions', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'ghost-region' });
+    const defender = makeNation({ id: 'b', regionId: 'r1' });
+    const state = makeState([attacker, defender]);
+    const result = declareAttack(state, 'a', 'b', 10, 0);
+    expect(result).toEqual({ ok: false, error: 'REGION_NOT_FOUND' });
+  });
+
+  it('rejects when defender regionId is not found in stateView.regions', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'r0' });
+    const defender = makeNation({ id: 'b', regionId: 'ghost-region' });
+    const state = makeState([attacker, defender]);
+    const result = declareAttack(state, 'a', 'b', 10, 0);
+    expect(result).toEqual({ ok: false, error: 'REGION_NOT_FOUND' });
+  });
+
+  it('rejects non-integer or NaN army size', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'r0', army: { size: 100 } });
+    const defender = makeNation({ id: 'b', regionId: 'r1' });
+    const state = makeState([attacker, defender]);
+    expect(declareAttack(state, 'a', 'b', 10.5, 0)).toEqual({ ok: false, error: 'INSUFFICIENT_ARMY' });
+    expect(declareAttack(state, 'a', 'b', NaN, 0)).toEqual({ ok: false, error: 'INSUFFICIENT_ARMY' });
+    expect(declareAttack(state, 'a', 'b', Infinity, 0)).toEqual({ ok: false, error: 'INSUFFICIENT_ARMY' });
+  });
+
+  it('deducts in-flight (not-yet-arrived) marches from available army before checking sufficiency', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'r0', army: { size: 100 } });
+    const defender = makeNation({ id: 'b', regionId: 'r1' });
+    const state = makeState([attacker, defender], {
+      marches: [{ id: 'm-existing', attackerId: 'a', defenderId: 'b', size: 60, departedAt: 0, arrivesAt: 5 }],
+    });
+    // only 40 available (100 - 60 in-flight); asking for 50 should fail
+    expect(declareAttack(state, 'a', 'b', 50, 0)).toEqual({ ok: false, error: 'INSUFFICIENT_ARMY' });
+    // 40 should succeed
+    expect(declareAttack(state, 'a', 'b', 40, 0).ok).toBe(true);
+  });
+
+  it('does not count already-arrived marches (arrivesAt <= tick) as occupying army', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'r0', army: { size: 100 } });
+    const defender = makeNation({ id: 'b', regionId: 'r1' });
+    const state = makeState([attacker, defender], {
+      tick: 10,
+      marches: [{ id: 'm-arrived', attackerId: 'a', defenderId: 'b', size: 60, departedAt: 0, arrivesAt: 10 }],
+    });
+    expect(declareAttack(state, 'a', 'b', 90, 10).ok).toBe(true);
+  });
+
+  it('march ids get a sequence component so two marches departing the same tick never collide', () => {
+    const attacker = makeNation({ id: 'a', regionId: 'r0', army: { size: 100 } });
+    const other = makeNation({ id: 'c', regionId: 'r0', army: { size: 100 } });
+    const defender = makeNation({ id: 'b', regionId: 'r1' });
+    const state = makeState([attacker, other, defender]);
+    const r1 = declareAttack(state, 'a', 'b', 5, 0);
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    const stateWithMarch = { ...state, marches: [r1.value] };
+    const r2 = declareAttack(stateWithMarch, 'c', 'b', 5, 0);
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+    expect(r1.value.id).not.toBe(r2.value.id);
   });
 });
 

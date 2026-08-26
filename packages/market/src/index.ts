@@ -5,12 +5,14 @@ import type { Result } from '@micronation/shared';
 const RESOURCE_KINDS: ResourceKind[] = ['food', 'ore', 'fuel', 'money'];
 
 function isPositiveInteger(n: number): boolean {
-  return Number.isInteger(n) && n > 0;
+  return Number.isSafeInteger(n) && n > 0;
 }
 
 // 產生決定性 id(book 為純函式輸入,不可用 Date.now/crypto)——走 shared.makeId。
-function nextOrderId(ctx: NationCtx, o: NewOrder, book: MarketOrder[]): Id {
-  return makeId('order', ctx.tick, o.nationId, o.kind, o.side, book.length);
+// 用 book.length 當序號會撞號(cancel/成交移除訂單後,length 會回頭重複用過的值),
+// 改由呼叫端傳入單調遞增的 seq(例如 D1 的 autoincrement 或全域計數器)。
+function nextOrderId(ctx: NationCtx, o: NewOrder, seq: number): Id {
+  return makeId('order', ctx.tick, o.nationId, o.kind, o.side, seq);
 }
 
 function tradeId(buyOrderId: Id, sellOrderId: Id, index: number): Id {
@@ -22,8 +24,9 @@ export function placeOrder(
   o: NewOrder,
   ref: PriceRef,
   ctx: NationCtx,
-  tariffRate: number
-): Result<{ book: MarketOrder[]; trades: Trade[] }> {
+  tariffRate: number,
+  seq: number
+): Result<{ book: MarketOrder[]; trades: Trade[]; unbanded: boolean }> {
   // ---- 驗證 ----
   if (!isPositiveInteger(o.qty) || !isPositiveInteger(o.price)) {
     return err('INVALID_ORDER');
@@ -34,6 +37,12 @@ export function placeOrder(
   if (o.side !== 'buy' && o.side !== 'sell') {
     return err('INVALID_ORDER');
   }
+  if (!Number.isSafeInteger(seq) || seq < 0) {
+    return err('INVALID_ORDER');
+  }
+  if (!Number.isFinite(tariffRate) || tariffRate < 0 || tariffRate >= 1) {
+    return err('INVALID_TARIFF');
+  }
 
   if (!ctx.verified && o.qty > UNVERIFIED_ORDER_QTY_CAP) {
     return err('UNVERIFIED');
@@ -43,8 +52,12 @@ export function placeOrder(
     return err('PROTECTED_LIMIT');
   }
 
+  // 無有效參考價(缺值、非有限、或 <=0)時,無法判斷是否偏離「近期均價」,跳過價格帶檢查,
+  // 並在回傳標記 unbanded:true,交由呼叫端決定要不要額外提示/限制。
   const avg = ref.avgPrice[o.kind];
-  if (avg !== undefined && avg > 0) {
+  let unbanded = true;
+  if (avg !== undefined && Number.isFinite(avg) && avg > 0) {
+    unbanded = false;
     const deviation = Math.abs(o.price - avg) / avg;
     if (deviation > PRICE_BAND) {
       return err('PRICE_BAND');
@@ -52,7 +65,7 @@ export function placeOrder(
   }
 
   // ---- 撮合 ----
-  const takerId = nextOrderId(ctx, o, book);
+  const takerId = nextOrderId(ctx, o, seq);
   let remaining = o.qty;
   const trades: Trade[] = [];
   const nextBook: MarketOrder[] = [...book];
@@ -60,6 +73,7 @@ export function placeOrder(
   const isMatch = (resting: MarketOrder): boolean =>
     resting.kind === o.kind &&
     resting.side !== o.side &&
+    resting.nationId !== o.nationId && // 禁止自我對敲:同一國家的買賣單互相跳過,不成交
     (o.side === 'buy' ? resting.price <= o.price : resting.price >= o.price);
 
   // 候選:同 kind、對邊、價格符合;排序=價格優先(對 taker 最有利者優先)→時間優先(createdAt 早者優先)
@@ -122,7 +136,7 @@ export function placeOrder(
     });
   }
 
-  return ok({ book: finalBook, trades });
+  return ok({ book: finalBook, trades, unbanded });
 }
 
 export function cancelOrder(book: MarketOrder[], orderId: Id, nationId: Id): Result<{ book: MarketOrder[] }> {

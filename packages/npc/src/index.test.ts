@@ -99,15 +99,14 @@ describe('decideActions — ② 資源盈餘', () => {
 });
 
 describe('decideActions — ③ 被攻擊過', () => {
-  it('存在以本國為目標的行軍時,練兵至人口比例上限', () => {
+  it('nation.lastAttackedAt 在近期範圍內時,練兵至人口比例上限', () => {
     const nation = baseNation({
       resources: { food: 100, ore: 100, fuel: 100, money: 100000 },
       population: 10,
       army: { size: 0 },
+      lastAttackedAt: 9,
     });
-    const view = baseView({
-      marches: [{ id: 'm1', attackerId: 'enemy', defenderId: 'n1', size: 20, departedAt: 5, arrivesAt: 15 }],
-    });
+    const view = baseView({ tick: 10 });
     const actions = decideActions(nation, view, 'seed-f');
     const train = actions.find((a) => a.type === 'train');
     expect(train).toBeDefined();
@@ -126,11 +125,35 @@ describe('decideActions — ③ 被攻擊過', () => {
     expect(actions.some((a) => a.type === 'train')).toBe(false);
   });
 
-  it('不主動攻擊玩家:任何情況下輸出不含 attack 類型動作', () => {
-    const nation = baseNation({ resources: { food: 5, ore: 5, fuel: 5, money: 5 } });
+  it('lastAttackedAt 太久以前(超出近期窗口)不再視為被攻擊過', () => {
+    const nation = baseNation({
+      resources: { food: 100000, ore: 100000, fuel: 100000, money: 100000 },
+      army: { size: 0 },
+      lastAttackedAt: 0,
+    });
+    const view = baseView({ tick: 1000 });
+    const actions = decideActions(nation, view, 'seed-g2');
+    expect(actions.some((a) => a.type === 'train')).toBe(false);
+  });
+
+  it('不再依賴 view.marches 判斷被攻擊(行軍抵達後即從 marches 移除,但仍應能透過 lastAttackedAt 判斷)', () => {
+    const nation = baseNation({
+      resources: { food: 100, ore: 100, fuel: 100, money: 100000 },
+      population: 10,
+      army: { size: 0 },
+    });
+    // marches 裡有一筆指向本國的在途行軍,但 lastAttackedAt 未設定 → 不應觸發練兵
+    // (③規則的訊號來源已改為 lastAttackedAt,不是 view.marches)
     const view = baseView({
       marches: [{ id: 'm1', attackerId: 'enemy', defenderId: 'n1', size: 20, departedAt: 5, arrivesAt: 15 }],
     });
+    const actions = decideActions(nation, view, 'seed-h2');
+    expect(actions.some((a) => a.type === 'train')).toBe(false);
+  });
+
+  it('不主動攻擊玩家:任何情況下輸出不含 attack 類型動作', () => {
+    const nation = baseNation({ resources: { food: 5, ore: 5, fuel: 5, money: 5 }, lastAttackedAt: 9 });
+    const view = baseView({ tick: 10 });
     const actions = decideActions(nation, view, 'seed-h');
     expect(actions.every((a) => a.type !== ('attack' as never))).toBe(true);
   });
@@ -153,6 +176,40 @@ describe('decideActions — ④ 依短板升級建築', () => {
     });
     const actions = decideActions(nation, baseView(), 'seed-j');
     expect(actions.some((a) => a.type === 'build')).toBe(false);
+  });
+});
+
+describe('decideActions — 影子狀態不透支(regression for Codex finding #24)', () => {
+  it('①規則掛買單已計劃花掉的 money,④規則不可再用同一筆 money 判斷付得起升級', () => {
+    const nation = baseNation({
+      resources: { food: 50, ore: 10, fuel: 1000, money: 350 },
+      population: 100,
+      buildings: { farm: 5, mine: 0, refinery: 0, market: 0, barracks: 0, warehouse: 0, university: 0, wall: 0 },
+      buildQueue: [],
+      actionPoints: 99,
+    });
+    const actions = decideActions(nation, baseView(), 'seed-shadow-1');
+
+    const buy = actions.find((a) => a.type === 'placeOrder' && a.order.side === 'buy' && a.order.kind === 'food');
+    expect(buy).toBeDefined(); // ①規則花掉 30*10=300 money,剩 50
+
+    // mine 升級成本含 money:120,剩下的 50 付不起——④規則若沒看到①已經花掉的錢,會誤判付得起。
+    const build = actions.find((a) => a.type === 'build' && a.building === 'mine');
+    expect(build).toBeUndefined();
+  });
+
+  it('②規則掛出的賣單量會從影子庫存扣除,不會被後續規則重複視為可用存量', () => {
+    const nation = baseNation({
+      resources: { food: 1000, ore: 1000, fuel: 50000, money: 1000 },
+      buildings: { farm: 5, mine: 5, refinery: 5, market: 0, barracks: 0, warehouse: 0, university: 0, wall: 0 },
+      buildQueue: [],
+      actionPoints: 99,
+    });
+    const actions = decideActions(nation, baseView(), 'seed-shadow-2');
+    const sellFuel = actions.filter((a) => a.type === 'placeOrder' && a.order.kind === 'fuel' && a.order.side === 'sell');
+    // 同一 tick 對同一資源只應規劃賣出一次(規則②本身就是每種資源最多一筆),不會因為影子扣除後
+    // 又被其他規則誤判為「還有大量盈餘」而重複掛單。
+    expect(sellFuel.length).toBeLessThanOrEqual(1);
   });
 });
 
@@ -216,33 +273,55 @@ describe('generateNpcNations', () => {
     { id: 'r3', name: 'Region 3', bonuses: {} },
   ];
 
+  function unwrap(count: number, rs: Region[], seed: string) {
+    const r = generateNpcNations(count, rs, seed);
+    if (!r.ok) throw new Error(`setup failed: ${r.error}`);
+    return r.value;
+  }
+
   it('產生指定數量的 NPC(ownerId 為 null)', () => {
-    const nations = generateNpcNations(6, regions, 'gen-seed-a');
+    const nations = unwrap(6, regions, 'gen-seed-a');
     expect(nations).toHaveLength(6);
     expect(nations.every((n) => n.ownerId === null)).toBe(true);
   });
 
   it('名字不重複', () => {
-    const nations = generateNpcNations(20, regions, 'gen-seed-b');
+    const nations = unwrap(20, regions, 'gen-seed-b');
     const names = new Set(nations.map((n) => n.name));
     expect(names.size).toBe(nations.length);
   });
 
   it('分散各區:每個 region 都至少分配到一個 NPC(數量足夠時)', () => {
-    const nations = generateNpcNations(9, regions, 'gen-seed-c');
+    const nations = unwrap(9, regions, 'gen-seed-c');
     const regionIds = new Set(nations.map((n) => n.regionId));
     expect(regionIds.size).toBe(regions.length);
   });
 
   it('確定性:同 seed 同輸出', () => {
-    const a = generateNpcNations(5, regions, 'gen-seed-fixed');
-    const b = generateNpcNations(5, regions, 'gen-seed-fixed');
+    const a = unwrap(5, regions, 'gen-seed-fixed');
+    const b = unwrap(5, regions, 'gen-seed-fixed');
     expect(a).toEqual(b);
   });
 
   it('不同 seed 產生不同結果', () => {
-    const a = generateNpcNations(5, regions, 'gen-seed-1');
-    const b = generateNpcNations(5, regions, 'gen-seed-2');
+    const a = unwrap(5, regions, 'gen-seed-1');
+    const b = unwrap(5, regions, 'gen-seed-2');
     expect(a.map((n) => n.name)).not.toEqual(b.map((n) => n.name));
+  });
+
+  it('count 為 0 時允許,回傳空陣列', () => {
+    const nations = unwrap(0, regions, 'gen-seed-zero');
+    expect(nations).toHaveLength(0);
+  });
+
+  it('count 為負數、NaN、非整數或超過上限 → Err(INVALID_COUNT)', () => {
+    expect(generateNpcNations(-1, regions, 's')).toEqual({ ok: false, error: 'INVALID_COUNT' });
+    expect(generateNpcNations(NaN, regions, 's')).toEqual({ ok: false, error: 'INVALID_COUNT' });
+    expect(generateNpcNations(1.5, regions, 's')).toEqual({ ok: false, error: 'INVALID_COUNT' });
+    expect(generateNpcNations(1e9, regions, 's')).toEqual({ ok: false, error: 'INVALID_COUNT' });
+  });
+
+  it('regions 為空陣列 → Err(NO_REGIONS)', () => {
+    expect(generateNpcNations(3, [], 's')).toEqual({ ok: false, error: 'NO_REGIONS' });
   });
 });

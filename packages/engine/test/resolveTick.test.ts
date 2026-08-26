@@ -264,8 +264,8 @@ describe('battle resolution', () => {
 });
 
 describe('treaty expiry', () => {
-  it('expires an active treaty once createdAt + duration <= tick', () => {
-    const treaty = { id: 't-1', kind: 'nap' as const, aId: 'n1', bId: 'n2', status: 'active' as const, terms: { duration: 10 }, createdAt: 0 };
+  it('expires an active treaty once activatedAt + duration <= tick', () => {
+    const treaty = { id: 't-1', kind: 'nap' as const, aId: 'n1', bId: 'n2', status: 'active' as const, terms: { duration: 10, activatedAt: 0 }, createdAt: 0 };
     const world = makeWorld({ tick: 10, treaties: [treaty] });
     const { state, events } = resolveTick(world, 'seed-treaty');
     expect(state.treaties[0].status).toBe('expired');
@@ -273,7 +273,7 @@ describe('treaty expiry', () => {
   });
 
   it('does not touch a treaty that has not yet reached its duration', () => {
-    const treaty = { id: 't-2', kind: 'nap' as const, aId: 'n1', bId: 'n2', status: 'active' as const, terms: { duration: 10 }, createdAt: 5 };
+    const treaty = { id: 't-2', kind: 'nap' as const, aId: 'n1', bId: 'n2', status: 'active' as const, terms: { duration: 10, activatedAt: 5 }, createdAt: 5 };
     const world = makeWorld({ tick: 10, treaties: [treaty] });
     const { state } = resolveTick(world, 'seed-treaty-2');
     expect(state.treaties[0].status).toBe('active');
@@ -284,6 +284,29 @@ describe('treaty expiry', () => {
     const world = makeWorld({ tick: 10, treaties: [treaty] });
     const { state } = resolveTick(world, 'seed-treaty-3');
     expect(state.treaties[0].status).toBe('proposed');
+  });
+
+  it('uses activatedAt (not createdAt) to judge expiry — a treaty proposed long ago but only just activated is not yet expired', () => {
+    // regression for Codex finding #16 root cause: createdAt !== activatedAt, using createdAt would expire this too early.
+    const treaty = { id: 't-4', kind: 'nap' as const, aId: 'n1', bId: 'n2', status: 'active' as const, terms: { duration: 10, activatedAt: 8 }, createdAt: 0 };
+    const world = makeWorld({ tick: 10, treaties: [treaty] });
+    const { state } = resolveTick(world, 'seed-treaty-4');
+    expect(state.treaties[0].status).toBe('active');
+  });
+
+  it('an active treaty missing activatedAt (corrupted invariant) is safely left untouched, not crashed or force-expired', () => {
+    const treaty = { id: 't-5', kind: 'nap' as const, aId: 'n1', bId: 'n2', status: 'active' as const, terms: { duration: 10 }, createdAt: 0 };
+    const world = makeWorld({ tick: 999, treaties: [treaty] });
+    const { state } = resolveTick(world, 'seed-treaty-5');
+    expect(state.treaties[0].status).toBe('active');
+  });
+});
+
+describe('tick advancement', () => {
+  it('resolveTick advances state.tick by exactly 1', () => {
+    const world = makeWorld({ tick: 7 });
+    const { state } = resolveTick(world, 'seed-tick-advance');
+    expect(state.tick).toBe(8);
   });
 });
 

@@ -1,6 +1,6 @@
 // 平衡常數——集中單檔,不得散落到各模塊。數值為 M0 拍板初值,後續依測試調整。
 
-import type { BuildingKind, ResourceKind, TaxTier, EconomyTier, ConscriptionTier, OpennessTier, Tick, Resources, PolicyAxis } from './types';
+import type { BuildingKind, ResourceKind, TaxTier, EconomyTier, ConscriptionTier, OpennessTier, Tick, Resources, Policies } from './types';
 
 // ---- 建築:各級產出/成本/升級時間 ----
 // cost 為升到「下一級」所需資源;time 為該次升級耗費 tick 數。index 0 = 從 0→1 級。
@@ -164,7 +164,8 @@ export const NPC_INITIAL_ACTION_POINTS = 5;
 export const NPC_INITIAL_POPULATION = 100;
 export const NPC_INITIAL_MORALE = 60;
 export const NPC_INITIAL_ARMY_SIZE = 10;
-export const NPC_INITIAL_POLICIES: Record<PolicyAxis, string> = {
+export const NPC_MAX_GENERATE_COUNT = 500; // generateNpcNations 單次上限,避免呼叫端誤傳超大 count
+export const NPC_INITIAL_POLICIES: Policies = {
   tax: 'mid',
   economy: 'agri',
   conscription: 'volunteer',

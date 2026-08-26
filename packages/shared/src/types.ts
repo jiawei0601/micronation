@@ -1,5 +1,7 @@
 // 共用基礎型別——正本。與 docs/CONTRACT.md 不一致時以 CONTRACT.md 為準並回報。
 
+import type { EventType } from './events';
+
 export type Id = string; // ulid
 export type Tick = number; // 賽季內第 N tick,從 0 起
 
@@ -22,6 +24,14 @@ export type TaxTier = 'low' | 'mid' | 'high';
 export type EconomyTier = 'agri' | 'industry' | 'commerce';
 export type ConscriptionTier = 'volunteer' | 'draft';
 export type OpennessTier = 'closed' | 'neutral' | 'free';
+
+/** Nation.policies 精確型別——每軸只允許該軸自己的檔位聯集,取代裸 Record<PolicyAxis, string>。 */
+export interface Policies {
+  tax: TaxTier;
+  economy: EconomyTier;
+  conscription: ConscriptionTier;
+  openness: OpennessTier;
+}
 
 export interface FlagSpec {
   layout: string;
@@ -51,12 +61,14 @@ export interface Nation {
   buildings: Record<BuildingKind, number>; // 等級,0=未建
   buildQueue: { building: BuildingKind; completesAt: Tick }[];
   army: { size: number };
-  policies: Record<PolicyAxis, string>;
+  policies: Policies;
   policyChangedAt: Partial<Record<PolicyAxis, Tick>>;
   reputation: { breaches: number };
   protectedUntil: Tick; // 新手保護
   score: ScoreBreakdown;
   createdAt: Tick;
+  /** 最近一次被攻擊(以本國為 defender 的戰鬥解算)發生的 tick,供 npc 判斷是否需練兵。engine 於 resolveBattle 後寫入。 */
+  lastAttackedAt?: Tick;
 }
 
 export interface Region {
@@ -162,13 +174,42 @@ export interface WorldState {
 
 export interface GameEvent {
   tick: Tick;
-  type: string; // type 常數表在 shared/events.ts
+  type: EventType; // 常數表在 shared/events.ts
   nationIds: Id[];
   payload: unknown;
 }
 
-// PublicWorldView — 供 npc 與 web 使用的受限視角(不含其他玩家私密欄位時可延伸過濾)
-export type PublicWorldView = WorldState;
+/** 他國兵力只暴露概略級距,不洩漏精確數字。 */
+export type ArmySizeTier = 'none' | 'small' | 'medium' | 'large' | 'huge';
+
+/**
+ * PublicWorldView — 供 npc 與 web 使用的受限視角。
+ * 只暴露公開欄位:id/ownerId/name/flag/regionId/score/reputation/army 規模概略(armySizeTier)/
+ * protectedUntil/policies(政策依 PRD 為公開資訊,故保留)。不含 resources/actionPoints/
+ * buildQueue/lastAttackedAt 等私密細節。透過 `toPublicWorldView(state, viewerId)` 產生。
+ */
+export interface PublicNation {
+  id: Id;
+  ownerId: Id | null;
+  name: string;
+  flag: FlagSpec;
+  regionId: Id;
+  score: ScoreBreakdown;
+  reputation: { breaches: number };
+  armySizeTier: ArmySizeTier;
+  protectedUntil: Tick;
+  policies: Policies;
+}
+
+export interface PublicWorldView {
+  seasonId: Id;
+  tick: Tick;
+  regions: Region[];
+  nations: PublicNation[];
+  marches: March[];
+  treaties: Treaty[];
+  orders: MarketOrder[];
+}
 
 // NpcAction — 與玩家 API 同語意的指令聯集
 export type NpcAction =

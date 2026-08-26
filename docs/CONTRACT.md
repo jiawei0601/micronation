@@ -15,6 +15,8 @@ type PolicyAxis = 'tax' | 'economy' | 'conscription' | 'openness';
 // 各軸檔位(constants.ts 定義每檔修正值):
 // tax: low|mid|high; economy: agri|industry|commerce;
 // conscription: volunteer|draft; openness: closed|neutral|free
+// Policies = { tax: TaxTier; economy: EconomyTier; conscription: ConscriptionTier; openness: OpennessTier }
+//   ——每軸只接受自己的檔位聯集,取代裸 Record<PolicyAxis, string>(2026-08-26 修訂,finding #6)。
 
 interface Nation {
   id: Id; ownerId: Id | null;        // null = NPC
@@ -24,12 +26,13 @@ interface Nation {
   buildings: Record<BuildingKind, number>;     // 等級,0=未建
   buildQueue: { building: BuildingKind; completesAt: Tick }[];
   army: { size: number };
-  policies: Record<PolicyAxis, string>;
+  policies: Policies;
   policyChangedAt: Partial<Record<PolicyAxis, Tick>>;
   reputation: { breaches: number };
   protectedUntil: Tick;              // 新手保護
   score: ScoreBreakdown;
   createdAt: Tick;
+  lastAttackedAt?: Tick;             // 最近一次以本國為 defender 的戰鬥解算 tick,engine 於 resolveBattle 後寫入(finding #25)
 }
 interface ScoreBreakdown { economy: number; warfare: number; tech: number; diplomacy: number; total: number; }
 interface FlagSpec { layout: string; colors: string[]; emblem: string; }
@@ -39,7 +42,22 @@ interface WorldState {
   regions: Region[]; nations: Nation[];
   marches: March[]; treaties: Treaty[]; orders: MarketOrder[];
 }
-interface GameEvent { tick: Tick; type: string; nationIds: Id[]; payload: unknown; } // type 常數表在 shared/events.ts
+interface GameEvent { tick: Tick; type: EventType; nationIds: Id[]; payload: unknown; } // EventType = shared/events.ts 常數表的聯集(finding #9)
+
+// PublicWorldView — npc 與 web 用的受限視角(finding #7)。nations 換成 PublicNation[],
+// 只暴露 id/ownerId/name/flag/regionId/score/reputation/armySizeTier(概略級距,非精確兵力)/
+// protectedUntil/policies(依 PRD 政策本就公開)。不含 resources/actionPoints/buildQueue/lastAttackedAt。
+// 由純函式 `toPublicWorldView(state: WorldState, viewerId: Id | null): PublicWorldView`(shared/src/view.ts)產生。
+interface PublicNation {
+  id: Id; ownerId: Id | null; name: string; flag: FlagSpec; regionId: Id;
+  score: ScoreBreakdown; reputation: { breaches: number };
+  armySizeTier: 'none' | 'small' | 'medium' | 'large' | 'huge';
+  protectedUntil: Tick; policies: Policies;
+}
+interface PublicWorldView {
+  seasonId: Id; tick: Tick; regions: Region[]; nations: PublicNation[];
+  marches: March[]; treaties: Treaty[]; orders: MarketOrder[];
+}
 ```
 
 ## engine(packages/engine)——唯一入口
@@ -48,21 +66,33 @@ interface GameEvent { tick: Tick; type: string; nationIds: Id[]; payload: unknow
 resolveTick(state: WorldState, seed: string): { state: WorldState; events: GameEvent[] }
 ```
 - 職責順序:資源產出(區域加成×政策×建築)→ 人口/士氣 → 建設佇列完成 → 行軍推進與抵達戰鬥解算 → 條約到期 → 行動點發放 → 計分。
+- **`resolveTick` 回傳的 `state.tick` = 輸入 `state.tick + 1`**(2026-08-26 修訂,finding #1——舊版未推進 tick,會讓所有「到期」判定失準)。
 - 純函式:同 (state, seed) 必得同輸出;隨機一律走 seeded PRNG(shared 提供 `createRng(seed)`)。
-- 另輸出輔助純函式供前端預覽:`projectProduction(nation, region)`, `previewBattle(attacker, defender, seed?)`。
+- 另輸出輔助純函式供前端預覽:`projectProduction(nation, region)`, `previewBattle(attacker, defender, seed?)`。`previewBattle` 用 `seed !== undefined` 判斷有無 seed(finding #5——原本的 truthiness 判斷會把空字串 seed 誤當「無 seed」)。
 - **平衡常數集中在 `packages/shared/src/constants.ts` 單檔**,不得散落。
 - 戰鬥:`power = army.size × techMod × moraleMod × (0.9~1.1 rng)`;敗方損失=未保護資源(倉庫保護額度外)的 20-30%;攻方兵損與燃料成本必計;不可滅國。
+  - 戰功(warfare score)計算一律用 `resolveBattle` 實際算出的 power(含 tech/morale/rng 修正),不是原始 `army.size`(finding #2)。
+  - 燃料成本事件(`BATTLE_RESOLVED` payload 的 `fuelCost`)回報的是**實際扣除量**(燃料不足時會被 clamp 到剩餘量),不是名目應扣量(finding #3)。
+  - `MORALE_CHANGE` 事件 payload 的 `delta` 回報 clamp 後的實際差值(0-100 邊界會截斷),不是常數本身(finding #4)。
+  - 條約到期(步驟 5)以 `terms.activatedAt` 判定(不是 `createdAt`);若 `status==='active'` 但缺 `activatedAt`(不變量被破壞,見 diplomacy 段落),`resolveTick` 安全跳過該筆(無 Result 通道可回錯,採防禦性略過而非崩潰整個 tick)。
+  - 戰鬥解算後,defender 的 `lastAttackedAt` 寫入本 tick(finding #25,供 npc 判斷是否需練兵)。
 
 ## market(packages/market)
 
 ```ts
-placeOrder(book: MarketOrder[], o: NewOrder, ref: PriceRef, ctx: NationCtx, tariffRate: number): Result<{book, trades}>
+placeOrder(book: MarketOrder[], o: NewOrder, ref: PriceRef, ctx: NationCtx, tariffRate: number, seq: number): Result<{book, trades, unbanded: boolean}>
 cancelOrder(book, orderId, nationId): Result<{book}>
 // MarketOrder: { id, nationId, kind: ResourceKind, side: 'buy'|'sell', qty, price, createdAt }
-// PriceRef: 近期成交均價表;偏離 ±30% → Err('PRICE_BAND')
+// PriceRef: 近期成交均價表;偏離 ±30% → Err('PRICE_BAND')。avgPrice 缺值/非有限(NaN/Infinity)/<=0
+//   時視為無有效參考價,跳過價格帶檢查,回傳 unbanded:true(finding #13)。
 // NationCtx: { verified: boolean; protectedUntil; tick } — 未驗證/保護期大額 → Err
-// tariffRate: 跨區關稅率(呼叫端算好傳入,同區/免稅傳 0);Trade.tariff = round(成交量 × 成交價 × tariffRate)
-// 撮合:價格優先→時間優先;部分成交允許
+// tariffRate: 跨區關稅率(呼叫端算好傳入,同區/免稅傳 0);須為有限數且落在 [0,1),否則 Err('INVALID_TARIFF')
+//   (finding #12)。Trade.tariff = round(成交量 × 成交價 × tariffRate)
+// seq: 呼叫端提供的單調遞增序號(例如 D1 autoincrement),用於組 order id,避免用 book.length
+//   當序號在撤單/成交後被重複使用而撞號(finding #10)。非安全整數或負數 → Err('INVALID_ORDER')。
+// 撮合:價格優先→時間優先;部分成交允許;禁止自我對敲——resting order 的 nationId 與 taker 相同時
+//   直接跳過該筆(不成交,兩邊都留在 book),不是 Err(finding #11)。
+// isPositiveInteger 用 Number.isSafeInteger(不是 Number.isInteger)(finding #12)。
 // id 一律走 shared.makeId(prefix, ...parts) 純字串組合,不可用 Date.now/crypto
 ```
 `Result<T> = { ok: true; value: T } | { ok: false; error: string }`(shared 定義,全模塊共用,不丟例外)。
@@ -75,6 +105,15 @@ propose/respond/breach/expire → 純狀態轉移函式,輸入 Treaty[]+動作,�
 // TreatyTerms(shared/types.ts 正本): { duration, compensation?; allianceDefense?(kind==='alliance' 協防旗標);
 //   tariffDiscount?(kind==='trade' 關稅減免率 0~1); pendingResponderId?(propose/counter 後下一次 respond 應由誰發起);
 //   activatedAt?(進入 active 的 tick,expire 以此+duration 判定到期) }
+// 不變量(finding #8):status==='active' 的 Treaty 必有 terms.activatedAt——respond(action='accept') 必寫入
+//   (tick 參數)。expire() 若發現 active 卻缺 activatedAt(資料損壞),整批回 Err('CORRUPTED_TREATY'),
+//   不用 createdAt 當 fallback(那會讓到期時間算錯,見 finding #16)。engine.resolveTick 內建的條約到期邏輯
+//   面對同樣的損壞資料時採防禦性跳過(見 engine 段落),因為它沒有 Result 通道可回錯。
+// propose/respond(counter) 驗證 terms:duration 必為正安全整數;compensation(若提供)須 >=0;
+//   tariffDiscount(若提供)須落在 [0,1];不合法 → Err('INVALID_TERMS')(finding #15)。
+// propose 額外驗證:id 不可與既有 treaty 重複(Err('DUPLICATE_ID'));同 kind+同 pair 的重複檢查涵蓋
+//   'active'|'proposed'|'countered' 三種狀態(原本漏了 'countered')(finding #14)。
+// respond 的 action 須為 'accept'|'reject'|'counter' 白名單,其餘 → Err('INVALID_ACTION')(finding #17)。
 canAttack(treaties, attackerId, defenderId): { allowed: boolean; reason?: 'NAP'|'ALLIANCE' }
 breachPenalty(treaty): { compensation: number; reputationDelta: number }
 ```
@@ -83,8 +122,18 @@ breachPenalty(treaty): { compensation: number; reputationDelta: number }
 
 ```ts
 declareAttack(state-view, attackerId, defenderId, army, tick): Result<March>
-// 檢查:保護期、打農(國力比 < FARM_RATIO 無收益→Err 'FARMING')、NAP(呼叫 diplomacy.canAttack)、行動點(ATTACK_ACTION_POINT_COST,shared/constants)
+// 檢查順序:tick 必須等於 stateView.tick,否則 Err('TICK_MISMATCH')——簽名保留 tick 參數,
+//   但只信任 stateView.tick,不信任外部傳入值(finding #19)。
+//   → 保護期 → army 合法性(見下)→ 打農(國力比 < FARM_RATIO 無收益→Err 'FARMING')
+//   → NAP(呼叫 diplomacy.canAttack)→ 行動點(ATTACK_ACTION_POINT_COST,shared/constants)
+//   → region 存在性(見下)。
+// army 檢查:Number.isSafeInteger(army) 且 >0;可用兵力 = attacker.army.size 減去該國所有
+//   arrivesAt > tick 的在途行軍 size 總和,army 超出可用兵力 → Err('INSUFFICIENT_ARMY')(finding #18)。
+// region 檢查:attacker/defender 的 regionId 在 stateView.regions 找不到 index → Err('REGION_NOT_FOUND'),
+//   不可用 -1 index 硬算距離(finding #20)。
 // March: { id, attackerId, defenderId, size, departedAt, arrivesAt } — arrivesAt = tick + marchTime(regionDistance)
+//   id 用 shared.makeId('march', attackerId, defenderId, tick, seq) 組成,seq = 同 tick 已有的行軍數,
+//   避免同 tick 撞號(finding #21)。
 regionDistance(a: Region 索引, b): number   // 距離表在 shared/constants
 ```
 抵達後的戰鬥由 engine 在 resolveTick 內解算——military 只管合法性與排程。
@@ -93,8 +142,15 @@ regionDistance(a: Region 索引, b): number   // 距離表在 shared/constants
 
 ```ts
 decideActions(nation: Nation, view: PublicWorldView, seed: string): NpcAction[]
+generateNpcNations(count: number, regions: Region[], seed: string): Result<Nation[]>
 // NpcAction 是與玩家 API 同語意的指令聯集:{type:'build'|'placeOrder'|'train'|...}
 // 規則狀態機:糧食缺→買/蓋農場;盈餘→掛賣單;被打過→練兵;不主動攻擊玩家。
+// 「被打過」訊號改用 nation.lastAttackedAt(近 WAS_ATTACKED_RECENT_TICKS=48 tick 內),不是
+//   view.marches(行軍抵達即從 WorldState.marches 移除,讀不到「剛被打完」的情況)(finding #25)。
+// decideActions 內部維護影子資源/佇列狀態(逐規則模擬扣減),確保同一批回傳的 NpcAction[]
+//   合計起來整體可行、不會超支(例如①規則買糧花掉的錢,④規則不會誤判還付得起升級)(finding #24)。
+// generateNpcNations 驗證 count(Number.isSafeInteger、0<=count<=NPC_MAX_GENERATE_COUNT)與
+//   regions 非空,不合法回 Err('INVALID_COUNT' | 'NO_REGIONS')(finding #22, #23;簽名由 Nation[] 改為 Result<Nation[]>)。
 // 倉容公式 warehouseCapacity(level)、練兵成本 TRAIN_COST_PER_UNIT、佇列容量 BUILD_QUEUE_CAPACITY、
 // NPC 初始值 NPC_INITIAL_*——皆定義於 shared/constants.ts,npc 讀取同一份,不得自建假設值。
 ```

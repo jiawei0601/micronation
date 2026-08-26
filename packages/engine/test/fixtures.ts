@@ -1,4 +1,4 @@
-import type { BuildingKind, Nation, Region, WorldState, PolicyAxis } from '@micronation/shared';
+import type { BuildingKind, Nation, Region, WorldState, Policies } from '@micronation/shared';
 
 let counter = 0;
 function nextId(prefix: string): string {
@@ -17,7 +17,7 @@ const emptyBuildings = (): Record<BuildingKind, number> => ({
   wall: 0,
 });
 
-const defaultPolicies = (): Record<PolicyAxis, string> => ({
+const defaultPolicies = (): Policies => ({
   tax: 'mid',
   economy: 'agri',
   conscription: 'volunteer',

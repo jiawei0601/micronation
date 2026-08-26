@@ -37,72 +37,121 @@ const restingOrder = (overrides: Partial<MarketOrder> = {}): MarketOrder => ({
 
 describe('placeOrder — 驗證', () => {
   it('拒絕非正整數 qty', () => {
-    const r = placeOrder([], newOrder({ qty: 0 }), ref(), ctx(), NO_TARIFF);
+    const r = placeOrder([], newOrder({ qty: 0 }), ref(), ctx(), NO_TARIFF, 0);
     expect(r).toEqual({ ok: false, error: 'INVALID_ORDER' });
   });
 
   it('拒絕非正整數 price', () => {
-    const r = placeOrder([], newOrder({ price: -5 }), ref(), ctx(), NO_TARIFF);
+    const r = placeOrder([], newOrder({ price: -5 }), ref(), ctx(), NO_TARIFF, 0);
     expect(r).toEqual({ ok: false, error: 'INVALID_ORDER' });
   });
 
   it('未驗證帳號大額掛單 → UNVERIFIED', () => {
-    const r = placeOrder([], newOrder({ qty: 51 }), ref(), ctx({ verified: false }), NO_TARIFF);
+    const r = placeOrder([], newOrder({ qty: 51 }), ref(), ctx({ verified: false }), NO_TARIFF, 0);
     expect(r).toEqual({ ok: false, error: 'UNVERIFIED' });
   });
 
   it('未驗證帳號但在額度內 → 允許', () => {
-    const r = placeOrder([], newOrder({ qty: 50 }), ref(), ctx({ verified: false }), NO_TARIFF);
+    const r = placeOrder([], newOrder({ qty: 50 }), ref(), ctx({ verified: false }), NO_TARIFF, 0);
     expect(r.ok).toBe(true);
   });
 
   it('保護期內大額掛單 → PROTECTED_LIMIT', () => {
-    const r = placeOrder([], newOrder({ qty: 51 }), ref(), ctx({ protectedUntil: 200, tick: 100 }), NO_TARIFF);
+    const r = placeOrder([], newOrder({ qty: 51 }), ref(), ctx({ protectedUntil: 200, tick: 100 }), NO_TARIFF, 0);
     expect(r).toEqual({ ok: false, error: 'PROTECTED_LIMIT' });
   });
 
   it('保護期內但在額度內 → 允許', () => {
-    const r = placeOrder([], newOrder({ qty: 50 }), ref(), ctx({ protectedUntil: 200, tick: 100 }), NO_TARIFF);
+    const r = placeOrder([], newOrder({ qty: 50 }), ref(), ctx({ protectedUntil: 200, tick: 100 }), NO_TARIFF, 0);
     expect(r.ok).toBe(true);
   });
 
   it('保護期已過 → 不受額度限制', () => {
-    const r = placeOrder([], newOrder({ qty: 1000 }), ref(), ctx({ protectedUntil: 50, tick: 100, verified: true }), NO_TARIFF);
+    const r = placeOrder([], newOrder({ qty: 1000 }), ref(), ctx({ protectedUntil: 50, tick: 100, verified: true }), NO_TARIFF, 0);
     expect(r.ok).toBe(true);
   });
 
   it('價格偏離均價超過 +30% 上界 → PRICE_BAND', () => {
     // avg=10, band=30% → 上界 13,超過即拒絕
-    const r = placeOrder([], newOrder({ price: 14 }), ref(), ctx(), NO_TARIFF);
+    const r = placeOrder([], newOrder({ price: 14 }), ref(), ctx(), NO_TARIFF, 0);
     expect(r).toEqual({ ok: false, error: 'PRICE_BAND' });
   });
 
   it('價格恰在 +30% 邊界內 → 允許', () => {
-    const r = placeOrder([], newOrder({ price: 13 }), ref(), ctx(), NO_TARIFF);
+    const r = placeOrder([], newOrder({ price: 13 }), ref(), ctx(), NO_TARIFF, 0);
     expect(r.ok).toBe(true);
   });
 
   it('價格偏離均價超過 -30% 下界 → PRICE_BAND', () => {
     // 下界 7,低於即拒絕
-    const r = placeOrder([], newOrder({ price: 6 }), ref(), ctx(), NO_TARIFF);
+    const r = placeOrder([], newOrder({ price: 6 }), ref(), ctx(), NO_TARIFF, 0);
     expect(r).toEqual({ ok: false, error: 'PRICE_BAND' });
   });
 
   it('價格恰在 -30% 邊界內 → 允許', () => {
-    const r = placeOrder([], newOrder({ price: 7 }), ref(), ctx(), NO_TARIFF);
+    const r = placeOrder([], newOrder({ price: 7 }), ref(), ctx(), NO_TARIFF, 0);
     expect(r.ok).toBe(true);
   });
 
-  it('無均價參考資料時不做價格帶檢查', () => {
-    const r = placeOrder([], newOrder({ kind: 'ore', price: 999 }), ref(), ctx(), NO_TARIFF);
+  it('無均價參考資料時不做價格帶檢查,且標記 unbanded:true', () => {
+    const r = placeOrder([], newOrder({ kind: 'ore', price: 999 }), ref(), ctx(), NO_TARIFF, 0);
     expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.unbanded).toBe(true);
+  });
+
+  it('有有效均價時 unbanded 為 false', () => {
+    const r = placeOrder([], newOrder({ price: 10 }), ref(), ctx(), NO_TARIFF, 0);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.unbanded).toBe(false);
+  });
+
+  it('均價為非有限值(Infinity/NaN)時跳過價格帶檢查,不誤判 PRICE_BAND', () => {
+    const rInf = placeOrder([], newOrder({ kind: 'ore', price: 999 }), { avgPrice: { ore: Infinity } }, ctx(), NO_TARIFF, 0);
+    expect(rInf.ok).toBe(true);
+    const rNaN = placeOrder([], newOrder({ kind: 'ore', price: 999 }), { avgPrice: { ore: NaN } }, ctx(), NO_TARIFF, 0);
+    expect(rNaN.ok).toBe(true);
+  });
+
+  it('拒絕非有限或超出 [0,1) 的 tariffRate', () => {
+    expect(placeOrder([], newOrder(), ref(), ctx(), -0.1, 0)).toEqual({ ok: false, error: 'INVALID_TARIFF' });
+    expect(placeOrder([], newOrder(), ref(), ctx(), 1, 0)).toEqual({ ok: false, error: 'INVALID_TARIFF' });
+    expect(placeOrder([], newOrder(), ref(), ctx(), NaN, 0)).toEqual({ ok: false, error: 'INVALID_TARIFF' });
+    expect(placeOrder([], newOrder(), ref(), ctx(), Infinity, 0)).toEqual({ ok: false, error: 'INVALID_TARIFF' });
+  });
+
+  it('拒絕非安全整數或負數的 seq', () => {
+    expect(placeOrder([], newOrder(), ref(), ctx(), NO_TARIFF, -1)).toEqual({ ok: false, error: 'INVALID_ORDER' });
+    expect(placeOrder([], newOrder(), ref(), ctx(), NO_TARIFF, 1.5)).toEqual({ ok: false, error: 'INVALID_ORDER' });
+  });
+});
+
+describe('placeOrder — id 唯一性(seq 避免撞號)', () => {
+  it('相同 book.length(空 book)但不同 seq 產生不同 order id,避免用 book.length 當序號時的撞號', () => {
+    const r1 = placeOrder([], newOrder({ nationId: 'nationA' }), ref(), ctx(), NO_TARIFF, 0);
+    const r2 = placeOrder([], newOrder({ nationId: 'nationA' }), ref(), ctx(), NO_TARIFF, 1);
+    expect(r1.ok && r2.ok).toBe(true);
+    if (!r1.ok || !r2.ok) return;
+    expect(r1.value.book[0].id).not.toBe(r2.value.book[0].id);
+  });
+
+  it('撤單後 book.length 回到相同值,但呼叫端遞增的 seq 仍確保新單不撞舊單 id', () => {
+    // 情境:掛單A(seq=0)成交出清、book 又變空(length回到0);此時若用 book.length 當序號,
+    // 掛單B也會得到序號0、id 與已被清空但仍存於歷史紀錄(trades/D1)的掛單A相同。改用呼叫端
+    // 遞增 seq 後,只要呼叫端不重複傳同一個 seq,就不會撞號。
+    const bookAfterFill: MarketOrder[] = []; // 模拟掛單A已完全成交、從 book 移除
+    const r = placeOrder(bookAfterFill, newOrder({ nationId: 'nationA' }), ref(), ctx(), NO_TARIFF, 7);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.book[0].id).toContain('-7');
   });
 });
 
 describe('placeOrder — 撮合', () => {
   it('完全成交:買單吃掉單一賣單', () => {
     const book = [restingOrder({ qty: 10, price: 10 })];
-    const r = placeOrder(book, newOrder({ qty: 10, price: 10 }), ref(), ctx(), NO_TARIFF);
+    const r = placeOrder(book, newOrder({ qty: 10, price: 10 }), ref(), ctx(), NO_TARIFF, 0);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.trades).toHaveLength(1);
@@ -113,7 +162,7 @@ describe('placeOrder — 撮合', () => {
 
   it('部分成交:買單數量大於單一賣單,剩餘掛回 book', () => {
     const book = [restingOrder({ id: 'sell-1', qty: 4, price: 10 })];
-    const r = placeOrder(book, newOrder({ qty: 10, price: 10 }), ref(), ctx(), NO_TARIFF);
+    const r = placeOrder(book, newOrder({ qty: 10, price: 10 }), ref(), ctx(), NO_TARIFF, 0);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.trades).toHaveLength(1);
@@ -125,7 +174,7 @@ describe('placeOrder — 撮合', () => {
 
   it('部分成交:賣單被多筆買單分批吃掉,對手單保留剩餘量', () => {
     const book = [restingOrder({ id: 'sell-1', qty: 3, price: 10 })];
-    const r = placeOrder(book, newOrder({ qty: 10, price: 10 }), ref(), ctx(), NO_TARIFF);
+    const r = placeOrder(book, newOrder({ qty: 10, price: 10 }), ref(), ctx(), NO_TARIFF, 0);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     // 賣單量不足,買單部分成交、賣單全數吃光
@@ -139,7 +188,7 @@ describe('placeOrder — 撮合', () => {
       restingOrder({ id: 'sell-high', qty: 10, price: 12, createdAt: 0 }),
       restingOrder({ id: 'sell-low', qty: 10, price: 8, createdAt: 5 }),
     ];
-    const r = placeOrder(book, newOrder({ qty: 5, price: 13 }), ref(), ctx(), NO_TARIFF);
+    const r = placeOrder(book, newOrder({ qty: 5, price: 13 }), ref(), ctx(), NO_TARIFF, 0);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.trades[0].sellOrderId).toBe('sell-low');
@@ -151,25 +200,36 @@ describe('placeOrder — 撮合', () => {
       restingOrder({ id: 'sell-later', qty: 10, price: 10, createdAt: 10 }),
       restingOrder({ id: 'sell-earlier', qty: 10, price: 10, createdAt: 1 }),
     ];
-    const r = placeOrder(book, newOrder({ qty: 5, price: 10 }), ref(), ctx(), NO_TARIFF);
+    const r = placeOrder(book, newOrder({ qty: 5, price: 10 }), ref(), ctx(), NO_TARIFF, 0);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.trades[0].sellOrderId).toBe('sell-earlier');
   });
 
-  it('自成交:同一國買賣自己掛的單 → 允許成交(釘住行為)', () => {
-    // 市場規則未禁止自成交;此測試釘住目前允許的行為,若未來要禁止需改此測試。
+  it('自成交:禁止同一國吃自己掛的單,跳過對手單、直接掛回 book(不成交)', () => {
     const book = [restingOrder({ id: 'sell-self', nationId: 'nationA', qty: 10, price: 10 })];
-    const r = placeOrder(book, newOrder({ nationId: 'nationA', qty: 10, price: 10 }), ref(), ctx(), NO_TARIFF);
+    const r = placeOrder(book, newOrder({ nationId: 'nationA', qty: 10, price: 10 }), ref(), ctx(), NO_TARIFF, 0);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.trades).toHaveLength(0);
+    // 原本的自家掛單原封不動、taker 單也整筆掛回 book
+    expect(r.value.book).toHaveLength(2);
+  });
+
+  it('自成交跳過後,仍可撮合其他國家的對手單', () => {
+    const book = [
+      restingOrder({ id: 'sell-self', nationId: 'nationA', qty: 10, price: 10 }),
+      restingOrder({ id: 'sell-other', nationId: 'nationC', qty: 10, price: 10 }),
+    ];
+    const r = placeOrder(book, newOrder({ nationId: 'nationA', qty: 10, price: 10 }), ref(), ctx(), NO_TARIFF, 0);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.trades).toHaveLength(1);
-    expect(r.value.trades[0].buyerId).toBe('nationA');
-    expect(r.value.trades[0].sellerId).toBe('nationA');
+    expect(r.value.trades[0].sellOrderId).toBe('sell-other');
   });
 
   it('無對手單時掛單直接進 book', () => {
-    const r = placeOrder([], newOrder({ qty: 10, price: 10 }), ref(), ctx(), NO_TARIFF);
+    const r = placeOrder([], newOrder({ qty: 10, price: 10 }), ref(), ctx(), NO_TARIFF, 0);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.trades).toHaveLength(0);
@@ -178,7 +238,7 @@ describe('placeOrder — 撮合', () => {
 
   it('不同資源種類不互相撮合', () => {
     const book = [restingOrder({ id: 'sell-ore', kind: 'ore', qty: 10, price: 10 })];
-    const r = placeOrder(book, newOrder({ kind: 'food', qty: 10, price: 10 }), ref(), ctx(), NO_TARIFF);
+    const r = placeOrder(book, newOrder({ kind: 'food', qty: 10, price: 10 }), ref(), ctx(), NO_TARIFF, 0);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.trades).toHaveLength(0);
@@ -187,7 +247,7 @@ describe('placeOrder — 撮合', () => {
 
   it('賣單找不到夠低價的買單則不成交', () => {
     const book = [restingOrder({ id: 'buy-1', side: 'buy', qty: 10, price: 5 })];
-    const r = placeOrder(book, newOrder({ side: 'sell', qty: 10, price: 10 }), ref(), ctx(), NO_TARIFF);
+    const r = placeOrder(book, newOrder({ side: 'sell', qty: 10, price: 10 }), ref(), ctx(), NO_TARIFF, 0);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.trades).toHaveLength(0);

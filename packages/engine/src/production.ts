@@ -9,10 +9,8 @@ import { RESOURCE_KINDS, zeroResources } from './resources';
  */
 export function computeProduction(nation: Nation, region: Region | undefined): Resources {
   const out = zeroResources();
-  const economyTier = nation.policies.economy as keyof typeof ECONOMY_MODIFIERS | undefined;
-  const taxTier = nation.policies.tax as keyof typeof TAX_MODIFIERS | undefined;
-  const economyMod = economyTier ? ECONOMY_MODIFIERS[economyTier] : undefined;
-  const taxMod = taxTier ? TAX_MODIFIERS[taxTier] : undefined;
+  const economyMod = ECONOMY_MODIFIERS[nation.policies.economy];
+  const taxMod = TAX_MODIFIERS[nation.policies.tax];
 
   for (const kind of Object.keys(nation.buildings) as (keyof Nation['buildings'])[]) {
     const level = nation.buildings[kind];

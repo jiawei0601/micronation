@@ -38,8 +38,9 @@ export function applyPopulationTick(nation: Nation, foodAfterProduction: number,
       events.push({ tick, type: EVENT.POPULATION_CHANGE, nationIds: [nation.id], payload: { delta: growth, reason: 'surplus' } });
     }
     if (morale < 100) {
+      const before = morale;
       morale = Math.min(100, morale + MORALE_SURPLUS_DELTA);
-      events.push({ tick, type: EVENT.MORALE_CHANGE, nationIds: [nation.id], payload: { delta: MORALE_SURPLUS_DELTA, reason: 'surplus' } });
+      events.push({ tick, type: EVENT.MORALE_CHANGE, nationIds: [nation.id], payload: { delta: morale - before, reason: 'surplus' } });
     }
   } else {
     food = 0; // 糧食庫存不可為負,短缺直接清零
@@ -48,8 +49,9 @@ export function applyPopulationTick(nation: Nation, foodAfterProduction: number,
     if (population !== nation.population) {
       events.push({ tick, type: EVENT.POPULATION_CHANGE, nationIds: [nation.id], payload: { delta: population - nation.population, reason: 'shortage' } });
     }
+    const beforeMorale = morale;
     morale = Math.max(0, morale + MORALE_DEFICIT_DELTA);
-    events.push({ tick, type: EVENT.MORALE_CHANGE, nationIds: [nation.id], payload: { delta: MORALE_DEFICIT_DELTA, reason: 'shortage' } });
+    events.push({ tick, type: EVENT.MORALE_CHANGE, nationIds: [nation.id], payload: { delta: morale - beforeMorale, reason: 'shortage' } });
   }
 
   return { food, population, morale, events };

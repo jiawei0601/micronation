@@ -49,8 +49,7 @@ function diplomacyScore(nation: Nation, treaties: Treaty[]): number {
   const activeCount = treaties.filter(
     (t) => t.status === 'active' && (t.aId === nation.id || t.bId === nation.id)
   ).length;
-  const opennessTier = nation.policies.openness as keyof typeof OPENNESS_MODIFIERS | undefined;
-  const mult = opennessTier ? OPENNESS_MODIFIERS[opennessTier].diplomacyScoreMult : 1;
+  const mult = OPENNESS_MODIFIERS[nation.policies.openness].diplomacyScoreMult;
   return Math.round(activeCount * DIPLOMACY_SCORE_PER_ACTIVE_TREATY * mult);
 }
 

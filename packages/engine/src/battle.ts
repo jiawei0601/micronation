@@ -38,7 +38,7 @@ export interface BattlePreview {
 
 /** 前端預覽用純函式:給 seed 走真隨機,不給則用中位數 1.0(無隨機)估算。 */
 export function previewBattle(attacker: Nation, defender: Nation, seed?: string): BattlePreview {
-  const rng = seed ? createRng(seed) : undefined;
+  const rng = seed !== undefined ? createRng(seed) : undefined;
   const fA = rng ? rngRange(rng, 0.9, 1.1) : 1;
   const fD = rng ? rngRange(rng, 0.9, 1.1) : 1;
   const attackerPower = computePower(attacker, fA);
@@ -64,6 +64,9 @@ export interface BattleResolution {
   defender: Nation;
   events: GameEvent[];
   attackerWins: boolean;
+  /** 實際算出的戰力(非原始 army.size),供計分模塊使用——見 score.ts BattleOutcomeForScore。 */
+  attackerPower: number;
+  defenderPower: number;
 }
 
 /**
@@ -92,7 +95,9 @@ export function resolveBattle(attacker: Nation, defender: Nation, rng: Rng, tick
 
   // 攻方燃料成本(先套用戰敗損失,若攻方就是敗方)
   const newAttackerResources = cloneResources(attacker === loser ? loserResources : attacker.resources);
-  const fuelCost = Math.round(attacker.army.size * FUEL_COST_PER_ARMY);
+  const nominalFuelCost = Math.round(attacker.army.size * FUEL_COST_PER_ARMY);
+  // 燃料不足時只能扣到 0——payload 必須回報「實際扣除量」,不是名目應扣量,否則事件記錄與資源異動對不上。
+  const fuelCost = Math.min(nominalFuelCost, newAttackerResources.fuel);
   newAttackerResources.fuel = Math.max(0, newAttackerResources.fuel - fuelCost);
 
   const newDefenderResources = cloneResources(defender === loser ? loserResources : defender.resources);
@@ -148,5 +153,5 @@ export function resolveBattle(attacker: Nation, defender: Nation, rng: Rng, tick
     },
   ];
 
-  return { attacker: newAttacker, defender: newDefender, events, attackerWins };
+  return { attacker: newAttacker, defender: newDefender, events, attackerWins, attackerPower, defenderPower };
 }

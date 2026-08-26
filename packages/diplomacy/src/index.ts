@@ -1,4 +1,4 @@
-import type { Treaty, TreatyKind, TreatyTerms, Id, Tick, GameEvent } from '@micronation/shared';
+import type { Treaty, TreatyKind, TreatyTerms, Id, Tick, GameEvent, EventType } from '@micronation/shared';
 import { ok, err, EVENT } from '@micronation/shared';
 import type { Result } from '@micronation/shared';
 
@@ -18,12 +18,25 @@ function replaceAt(treaties: Treaty[], idx: number, updated: Treaty): Treaty[] {
   return next;
 }
 
-function mkEvent(type: string, tick: Tick, nationIds: Id[], payload: unknown): GameEvent {
+function mkEvent(type: EventType, tick: Tick, nationIds: Id[], payload: unknown): GameEvent {
   return { tick, type, nationIds, payload };
 }
 
 function involvesPair(t: Treaty, x: Id, y: Id): boolean {
   return (t.aId === x && t.bId === y) || (t.aId === y && t.bId === x);
+}
+
+/** duration 必為正整數;compensation 若提供須 >=0;tariffDiscount 若提供須落在 0~1。 */
+function invalidTerms(terms: Partial<TreatyTerms>): boolean {
+  if (terms.duration !== undefined && (!Number.isSafeInteger(terms.duration) || terms.duration <= 0)) return true;
+  if (terms.compensation !== undefined && (!Number.isFinite(terms.compensation) || terms.compensation < 0)) return true;
+  if (
+    terms.tariffDiscount !== undefined &&
+    (!Number.isFinite(terms.tariffDiscount) || terms.tariffDiscount < 0 || terms.tariffDiscount > 1)
+  ) {
+    return true;
+  }
+  return false;
 }
 
 // ---- propose ----
@@ -38,12 +51,14 @@ export function propose(
   tick: Tick
 ): Result<{ treaties: Treaty[]; events: GameEvent[] }> {
   if (aId === bId) return err('SELF_TREATY');
+  if (invalidTerms(terms)) return err('INVALID_TERMS');
+  if (treaties.some((t) => t.id === id)) return err('DUPLICATE_ID');
 
   const duplicate = treaties.some(
     (t) =>
       t.kind === kind &&
       involvesPair(t, aId, bId) &&
-      (t.status === 'active' || t.status === 'proposed')
+      (t.status === 'active' || t.status === 'proposed' || t.status === 'countered')
   );
   if (duplicate) return err('DUPLICATE_TREATY');
 
@@ -78,6 +93,8 @@ export function respond(
   tick: Tick,
   counterTerms?: Partial<TreatyTerms>
 ): Result<{ treaties: Treaty[]; events: GameEvent[] }> {
+  if (action !== 'accept' && action !== 'reject' && action !== 'counter') return err('INVALID_ACTION');
+
   const idx = treaties.findIndex((t) => t.id === treatyId);
   if (idx === -1) return err('NOT_FOUND');
   const treaty = treaties[idx];
@@ -88,6 +105,8 @@ export function respond(
   const terms = getTerms(treaty);
   const pending = terms.pendingResponderId ?? treaty.bId;
   if (responderId !== pending) return err('NOT_PENDING_PARTY');
+
+  if (action === 'counter' && counterTerms && invalidTerms(counterTerms)) return err('INVALID_TERMS');
 
   if (action === 'accept') {
     const updated = withTerms(
@@ -153,11 +172,19 @@ export function breach(
 // ---- expire ----
 
 export function expire(treaties: Treaty[], tick: Tick): Result<{ treaties: Treaty[]; events: GameEvent[] }> {
+  // 不變量:status === 'active' 的條約必有 terms.activatedAt(respond(accept) 必寫入)。
+  // 若缺失代表資料損壞,expire 整批回 Err,而非用 createdAt 猜測(那會讓條約提早/延遲到期)。
+  for (const t of treaties) {
+    if (t.status === 'active' && t.terms.activatedAt === undefined) {
+      return err('CORRUPTED_TREATY');
+    }
+  }
+
   const events: GameEvent[] = [];
   const next = treaties.map((t) => {
     if (t.status !== 'active') return t;
     const terms = getTerms(t);
-    const activatedAt = terms.activatedAt ?? t.createdAt;
+    const activatedAt = terms.activatedAt as Tick;
     if (activatedAt + terms.duration > tick) return t;
     events.push(mkEvent(EVENT.TREATY_EXPIRED, tick, [t.aId, t.bId], { treatyId: t.id }));
     return { ...t, status: 'expired' as const };

@@ -90,14 +90,18 @@ export function resolveTick(state: WorldState, seed: string): { state: WorldStat
       ...result.attacker,
       army: { size: Math.max(0, homeArmySize) + result.attacker.army.size },
     };
+    // 被攻擊方記錄:npc.wasAttacked 用此欄位判斷是否該練兵(marches 抵達即清除,無法回溯)。
+    const defenderWithAttackMark: Nation = { ...result.defender, lastAttackedAt: tick };
 
     nationById.set(attacker.id, mergedAttacker);
-    nationById.set(defender.id, result.defender);
+    nationById.set(defender.id, defenderWithAttackMark);
 
+    // 戰功計算必須用「實際算出的 power」(含 tech/morale/rng 修正),不是原始兵力數字,
+    // 否則同兵力不同科技/士氣的國家會拿到一樣的戰功,失去「勝強敵多」的意義。
     const battleForScore = (isAttacker: boolean): BattleOutcomeForScore => ({
       won: isAttacker ? result.attackerWins : !result.attackerWins,
-      ownPower: isAttacker ? attackerForBattle.army.size || 1 : defender.army.size || 1,
-      opponentPower: isAttacker ? defender.army.size || 1 : attackerForBattle.army.size || 1,
+      ownPower: isAttacker ? result.attackerPower || 1 : result.defenderPower || 1,
+      opponentPower: isAttacker ? result.defenderPower || 1 : result.attackerPower || 1,
       opponentIsNpc: isAttacker ? defender.ownerId === null : attacker.ownerId === null,
     });
     battlesByNation.set(attacker.id, [...(battlesByNation.get(attacker.id) ?? []), battleForScore(true)]);
@@ -105,10 +109,15 @@ export function resolveTick(state: WorldState, seed: string): { state: WorldStat
   }
   nations = nations.map((n) => nationById.get(n.id) ?? n);
 
-  // 5) 條約到期
+  // 5) 條約到期——以 activatedAt(生效時間)判定,不是 createdAt(提案時間)。
+  // 不變量:status==='active' 必有 terms.activatedAt(diplomacy.respond(accept) 保證寫入)。
+  // resolveTick 沒有 Result 通道可回錯,遇到不變量被破壞的資料時安全跳過(不炸整個 tick),
+  // 與 diplomacy.expire()(有 Result,直接回 Err)採不同但一致的資料損壞處理策略。
   const treaties: Treaty[] = state.treaties.map((treaty) => {
     if (treaty.status !== 'active') return treaty;
-    if (treaty.createdAt + treaty.terms.duration > tick) return treaty;
+    const activatedAt = treaty.terms.activatedAt;
+    if (activatedAt === undefined) return treaty;
+    if (activatedAt + treaty.terms.duration > tick) return treaty;
     events.push({ tick, type: EVENT.TREATY_EXPIRED, nationIds: [treaty.aId, treaty.bId], payload: { treatyId: treaty.id } });
     return { ...treaty, status: 'expired' as const };
   });
@@ -130,6 +139,7 @@ export function resolveTick(state: WorldState, seed: string): { state: WorldStat
 
   const newState: WorldState = {
     ...state,
+    tick: state.tick + 1,
     nations,
     marches: remainingMarches,
     treaties,
