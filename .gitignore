@@ -4,3 +4,4 @@ dist/
 *.tsbuildinfo
 coverage/
 .DS_Store
+.review-diff.txt
